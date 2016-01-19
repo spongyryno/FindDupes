@@ -123,6 +123,10 @@ static inline void strcpy_translate_dos(const char *src, char *dst, size_t dstsi
 		{
 			*p ++ = '\r';
 		}
+		else if (*src == '\r' && src[1] == '\n')
+		{
+			*p++ = *src++;
+		}
 
 		*p++ = *src++;
 	}
@@ -132,24 +136,17 @@ static inline void strcpy_translate_dos(const char *src, char *dst, size_t dstsi
 
 //=================================================================================================
 //=================================================================================================
-void Logger::printf(Level level, const char *pszFormat, ...)
+void Logger::puts(Level level, const char *pszString, DWORD dwLen)
 {
-	if (0 == (level & (this->outLevel | this->logLevel | Level::CmdScript | Level::Ps1Script)))
+	const size_t maxLine = 16384;
+	char output[maxLine];
+
+	if (0 == dwLen)
 	{
-		return;
+		dwLen = ARRAYSIZE(output);
 	}
 
-	va_list arglist;
-	const size_t maxLine = 16384;
-	char unixoutput[maxLine];
-	char output[maxLine];
-	int retval;
-
-	va_start(arglist, pszFormat);
-	retval = vsprintf_s(unixoutput, ARRAYSIZE(unixoutput), pszFormat, arglist);
-	va_end(arglist);
-
-	strcpy_translate_dos(unixoutput, output, ARRAYSIZE(output));
+	strcpy_translate_dos(pszString, output, dwLen);
 
 	if (0 != (level & Level::CmdScript))
 	{
@@ -174,6 +171,27 @@ void Logger::printf(Level level, const char *pszFormat, ...)
 		fputs(output, stdout);
 	}
 
+}
+
+//=================================================================================================
+//=================================================================================================
+void Logger::printf(Level level, const char *pszFormat, ...)
+{
+	if (0 == (level & (this->outLevel | this->logLevel | Level::CmdScript | Level::Ps1Script)))
+	{
+		return;
+	}
+
+	va_list arglist;
+	const size_t maxLine = 16384;
+	char output[maxLine];
+	int retval;
+
+	va_start(arglist, pszFormat);
+	retval = vsprintf_s(output, ARRAYSIZE(output), pszFormat, arglist);
+	va_end(arglist);
+
+	this->puts(level, output, 0);
 	return;
 }
 

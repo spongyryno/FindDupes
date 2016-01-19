@@ -6,45 +6,11 @@
 #include <utilities.h>
 #include <FileOnDisk.h>
 #include "Build_Increment.h"
+#include "Resource.h"
 
 #pragma comment(lib, "version.lib")
 
-#define VERSION "3.62.2016.0118.0"
-
-static const char szHelp[] =
-"\n"
-"Searches the current folder and all subfolders, looking for duplicate files\n"
-"by building a table of every file, sorting them by size, and then examining\n"
-"file contents for files that have the same size. For each file that needs to\n"
-"be read in, an MD5 hash is calculated of its contents, and that hash is used\n"
-"for the comparisons.\n"
-"\n"
-"In each folder where a file's contents needed to be hashed, a special hidden\n"
-"file called \"md5cache.bin\" is created that contains the hash (and file info)\n"
-"for all the files in that folder (that have been hashed). On subsequent runs,\n"
-"that cached hash value is used as long as the file hasn't changed, saving\n"
-"time, and allowing secondary passes to take only seconds, even in file systems\n"
-"with tens of thousands of files.\n"
-"\n"
-"By default, the output is written to a log file at \"c:\\ProgramData\\dupes.log\".\n"
-"\n"
-"You can specify the \"-i\" command line option, followed by a folder, if you\n"
-"want to target a specific folder for duplicate files. This will change the\n"
-"output to only show files under that folder that have a duplicate outside\n"
-"that folder. This is particularly useful if you want to delete a folder's\n"
-"duplicates.\n\n"
-"Options:\n"
-"    /n          Omit logog.\n"
-"    /c          Clean md5cache.bin files.\n"
-"    /i folder   Specify an \"in\" folder.\n"
-"    /I folder   Specify an \"in\" folder, and generate a delete script.\n\n"
-"The \"in\" folder compares the contents of the current folder against the \"in\"\n"
-"folder. The only duplicates shown are files under the \"in\" folder that have\n"
-"a duplicate under the current folder. So, for example, if there are two matching\n"
-"files under the \"in\" folder but nothing under the current folder that matches,\n"
-"nothing will be displayed, and likewise, dupes under the current folder that don't\n"
-"match something under the \"in\" folder will end up displaying nothing.\n"
-"\n";
+#define VERSION "3.63.2016.0119.0"
 
 #define _LSTRINGIZE(x) L#x
 #define LSTRINGIZE(x) _LSTRINGIZE(x)
@@ -52,6 +18,60 @@ static const char szHelp[] =
 #define ASTRINGIZE(x) _ASTRINGIZE(x)
 
 #define BUILD_DATE_STRING ASTRINGIZE(BUILD_DATE)
+
+//========================================================================
+//
+// LoadResource
+//
+// Read a resource into memory, return a pointer to it, and optionally
+// return the size of the resource
+//
+// in:
+//	hInst		handle to the application instance
+//	szItem		the resource identifier
+//	pdwSize		pointer to size
+//
+// out:
+//	LPVOID		pointer to the memory
+//
+//========================================================================
+static void *LoadResource(HINSTANCE hInst, LPCWSTR szType, LPCWSTR szItem, DWORD *pdwSize=NULL)
+{
+	HRSRC	hRsrcInfo;
+	HGLOBAL hGlobal;
+	LPVOID	pR;
+	DWORD	dwSize;
+
+	if (!(hRsrcInfo = FindResource( hInst, szItem, szType )))
+	{
+		return NULL;
+	}
+
+	dwSize=SizeofResource(hInst, hRsrcInfo);
+
+	if (!(hGlobal = LoadResource(hInst, hRsrcInfo)))
+	{
+		return NULL;
+	}
+
+	if (!(pR=LockResource(hGlobal)))
+	{
+		return NULL;
+	}
+
+	if (pdwSize)
+		*pdwSize = dwSize;
+
+	return pR;
+}
+
+//========================================================================
+//========================================================================
+static void *LoadResource(HINSTANCE hInst, size_t szType, size_t szItem, DWORD *pdwSize=NULL)
+{
+	return LoadResource(hInst, reinterpret_cast<LPCWSTR>(szType), reinterpret_cast<LPCWSTR>(szItem), pdwSize);
+}
+
 
 //==================================================================================================
 //==================================================================================================
@@ -220,7 +240,8 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	if (showHelp)
 	{
-		Logger::Get().printf(Logger::Level::Error, "%s", szHelp);
+		DWORD dwLen = 0;
+		Logger::Get().puts(Logger::Level::Error, reinterpret_cast<char *>(LoadResource(GetModuleHandle(nullptr), ID_BINARY, ID_USAGE, &dwLen)), dwLen);
 		return -1;
 	}
 	else if (cleanCacheFiles)
@@ -246,7 +267,8 @@ int _tmain(int argc, _TCHAR* argv[])
 					return -1;
 				}
 
-				Logger::Get().printf(Logger::Level::Ps1Script, "\tparam([switch]$DoIt)\n\n$files = @(\n");
+				DWORD dwLen = 0;
+				Logger::Get().puts(Logger::Level::Ps1Script, reinterpret_cast<char *>(LoadResource(GetModuleHandle(nullptr), ID_BINARY, ID_PSHEADER, &dwLen)), dwLen);
 			}
 
 			if (!RelativeToFullpath(szInFolder, ARRAYSIZE(szInFolder)))
@@ -405,53 +427,8 @@ int _tmain(int argc, _TCHAR* argv[])
 
 			if (includeDeleteScript)
 			{
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\"\")\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "$files = $files | ? { $_ -and (Test-Path $_ ) }\n\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "function _Delete\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\tparam([string]$File, [switch]$DoIt)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\tif ($DoIt)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tRemove-Item -Force -ErrorAction SilentlyContinue $File\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore Gray $File\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\telse\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore Red $File\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t$folder = gi (Split-Path $File)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\twhile ($folder)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tif ($folder.GetDirectories().Count -ne 0)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t\tbreak\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$files_exist = $false\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$exclusions = 'desktop.ini','thumbs.db','md5cache.bin','folder.bin','folder.jpg'\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.GetFiles() | ? { $exclusions -notcontains $_.Name } | %% { $files_exist = $true }\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tif ($files_exist)\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t{\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t\tbreak\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t# delete all exclusions\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.GetFiles() | ? { $exclusions -contains $_.Name } | %% { $_.IsReadOnly = $false;$_.Delete() }\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t# delete the folder\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.Delete()\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore White $folder.FullName\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder = $folder.Parent\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "}\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "$files | %% -begin {$i=0} -process { Write-Progress -Activity \"Deleting \"\"$_\"\"...\" -PercentComplete (100.0 * $i / $files.Length);_Delete -DoIt:$DoIt $_;++$i }\n");
-				Logger::Get().printf(Logger::Level::Ps1Script, "\nif (-not $DoIt)\n{\n\tWrite-Host -Fore White \"`nNot actually doing anything since the \"\"-DoIt\"\" option was not specified.`n\"\n}\n\n");
+				DWORD dwLen = 0;
+				Logger::Get().puts(Logger::Level::Ps1Script, reinterpret_cast<char *>(LoadResource(GetModuleHandle(nullptr), ID_BINARY, ID_PSFOOTER, &dwLen)), dwLen);
 			}
 		}
 		else

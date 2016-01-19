@@ -51,6 +51,7 @@ public:
 	void Close();
 	void Reset();
 	void printf(Level level, const char *pszFormat, ...);
+	void puts(Level level, const char *pszString, DWORD dwLen);
 
 	Logger() : logLevel(Log_Default), outLevel(Out_Default), hFile(nullptr), hCmdScript(nullptr), hPs1Script(nullptr) {}
 	~Logger() { this->Close(); }

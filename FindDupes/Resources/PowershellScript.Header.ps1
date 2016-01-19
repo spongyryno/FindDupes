@@ -1,0 +1,3 @@
+	param([switch]$DoIt)
+
+$files = @(

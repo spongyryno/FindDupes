@@ -1,0 +1,38 @@
+
+Searches the current folder and all subfolders, looking for duplicate files
+by building a table of every file, sorting them by size, and then examining
+file contents for files that have the same size. For each file that needs to
+be read in, an MD5 hash is calculated of its contents, and that hash is used
+for the comparisons.
+
+In each folder where a file's contents needed to be hashed, a special hidden
+file called "md5cache.bin" is created that contains the hash (and file info)
+for all the files in that folder (that have been hashed). On subsequent runs,
+that cached hash value is used as long as the file hasn't changed, saving
+time, and allowing secondary passes to take only seconds, even in file systems
+with tens of thousands of files.
+
+By default, the output is written to a log file at "c:\ProgramData\dupes.log".
+
+You can specify the "-i" command line option, followed by a folder, if you
+want to target a specific folder for duplicate files. This will change the
+output to only show files under that folder that have a duplicate outside
+that folder. This is particularly useful if you want to delete a folder's
+duplicates.
+
+Options:
+    /n          Omit logog.
+    /c          Clean md5cache.bin files.
+    /i folder   Specify an "in" folder.
+    /I folder   Specify an "in" folder, and generate a delete script.
+
+The "in" folder compares the contents of the current folder against the "in"
+folder. The only duplicates shown are files under the "in" folder that have
+a duplicate under the current folder. So, for example, if there are two matching
+files under the "in" folder but nothing under the current folder that matches,
+nothing will be displayed, and likewise, dupes under the current folder that don't
+match something under the "in" folder will end up displaying nothing.
+
+
+
+
