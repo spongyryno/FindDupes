@@ -9,7 +9,7 @@
 
 #pragma comment(lib, "version.lib")
 
-#define VERSION "3.52.2015.0520.0"
+#define VERSION "3.62.2016.0118.0"
 
 static const char szHelp[] =
 "\n"
@@ -99,6 +99,7 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	wchar_t szDupesLogFile[fileMax];
 	wchar_t szDupesCmdFile[fileMax];
+	wchar_t szDupesPs1File[fileMax];
 	char szRootFolder[fileMax];
 	char szInFolder[fileMax];
 
@@ -114,17 +115,23 @@ int _tmain(int argc, _TCHAR* argv[])
 	HRESULT hr;
 
 	// get the default location of the log file
-	hr = SHGetFolderPath(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, szAppData);
-	if (FAILED(hr))
+	DWORD dwPathSize = GetEnvironmentVariable(L"temp", szAppData, ARRAYSIZE(szAppData));
+	if ((0 == dwPathSize) || (dwPathSize > ARRAYSIZE(szAppData)))
 	{
-		fprintf(stderr, "Error: 0x%08X getting common appdata folder\n", hr);
-		return -1;
+		hr = SHGetFolderPath(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT, szAppData);
+		if (FAILED(hr))
+		{
+			fprintf(stderr, "Error: 0x%08X getting common appdata folder\n", hr);
+			return -1;
+		}
 	}
 
 	wcscpy_s(szDupesLogFile, szAppData);
 	wcscat_s(szDupesLogFile, L"\\dupes.log");
 	wcscpy_s(szDupesCmdFile, szAppData);
 	wcscat_s(szDupesCmdFile, L"\\dupes.cmd");
+	wcscpy_s(szDupesPs1File, szAppData);
+	wcscat_s(szDupesPs1File, L"\\dupes.ps1");
 
 	if (!Logger::Get().Open(szDupesLogFile))
 	{
@@ -232,6 +239,14 @@ int _tmain(int argc, _TCHAR* argv[])
 					fprintf(stderr, "Error: %d Could not open log file.\n", GetLastError());
 					return -1;
 				}
+
+				if (!Logger::Get().OpenPs1Script(szDupesPs1File))
+				{
+					fprintf(stderr, "Error: %d Could not open log file.\n", GetLastError());
+					return -1;
+				}
+
+				Logger::Get().printf(Logger::Level::Ps1Script, "\tparam([switch]$DoIt)\n\n$files = @(\n");
 			}
 
 			if (!RelativeToFullpath(szInFolder, ARRAYSIZE(szInFolder)))
@@ -365,7 +380,8 @@ int _tmain(int argc, _TCHAR* argv[])
 					{
 						if (includeDeleteScript)
 						{
-							Logger::Get().printf(Logger::Level::DeleteScript, "del /F /A \"%s\"\n", infiles.GetFilePath(infile));
+							Logger::Get().printf(Logger::Level::CmdScript, "del /F /A \"%s\"\n", infiles.GetFilePath(infile));
+							Logger::Get().printf(Logger::Level::Ps1Script, "\t\"%s\",\n", infiles.GetFilePath(infile));
 						}
 
 						Logger::Get().printf(Logger::Level::Dupes, "====================================================================================================\n");
@@ -386,6 +402,57 @@ int _tmain(int argc, _TCHAR* argv[])
 					}
 				}
 			});
+
+			if (includeDeleteScript)
+			{
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\"\")\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "$files = $files | ? { $_ -and (Test-Path $_ ) }\n\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "function _Delete\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\tparam([string]$File, [switch]$DoIt)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\tif ($DoIt)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tRemove-Item -Force -ErrorAction SilentlyContinue $File\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore Gray $File\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\telse\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore Red $File\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t$folder = gi (Split-Path $File)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\twhile ($folder)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tif ($folder.GetDirectories().Count -ne 0)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t\tbreak\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$files_exist = $false\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$exclusions = 'desktop.ini','thumbs.db','md5cache.bin','folder.bin','folder.jpg'\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.GetFiles() | ? { $exclusions -notcontains $_.Name } | %% { $files_exist = $true }\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tif ($files_exist)\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t{\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t\tbreak\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t# delete all exclusions\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.GetFiles() | ? { $exclusions -contains $_.Name } | %% { $_.IsReadOnly = $false;$_.Delete() }\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t# delete the folder\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder.Delete()\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\tWrite-Host -Fore White $folder.FullName\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t\t$folder = $folder.Parent\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\t}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "}\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "$files | %% -begin {$i=0} -process { Write-Progress -Activity \"Deleting \"\"$_\"\"...\" -PercentComplete (100.0 * $i / $files.Length);_Delete -DoIt:$DoIt $_;++$i }\n");
+				Logger::Get().printf(Logger::Level::Ps1Script, "\nif (-not $DoIt)\n{\n\tWrite-Host -Fore White \"`nNot actually doing anything since the \"\"-DoIt\"\" option was not specified.`n\"\n}\n\n");
+			}
 		}
 		else
 		{
@@ -489,6 +556,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (includeDeleteScript)
 	{
 		printf("Cmd file: \"%S\"\n", szDupesCmdFile);
+		printf("Ps1 file: \"%S\"\n", szDupesPs1File);
 	}
 
 	return 0;

@@ -28,7 +28,8 @@ public:
 		Warning			= 0x04,
 		Debug			= 0x08,
 		Dupes			= 0x10,
-		DeleteScript	= 0x20,
+		CmdScript		= 0x20,
+		Ps1Script		= 0x40,
 
 		Log_Default	= Error|Info|Warning|Debug|Dupes,
 		Out_Default = Error|Info|Warning,
@@ -45,11 +46,13 @@ public:
 	bool Open(const wchar_t *pszLogFile);
 	bool OpenCmdScript(const char *pszLogFile);
 	bool OpenCmdScript(const wchar_t *pszLogFile);
+	bool OpenPs1Script(const char *pszLogFile);
+	bool OpenPs1Script(const wchar_t *pszLogFile);
 	void Close();
 	void Reset();
 	void printf(Level level, const char *pszFormat, ...);
 
-	Logger() : logLevel(Log_Default), outLevel(Out_Default), hFile(nullptr), hDeleteScript(nullptr) {}
+	Logger() : logLevel(Log_Default), outLevel(Out_Default), hFile(nullptr), hCmdScript(nullptr), hPs1Script(nullptr) {}
 	~Logger() { this->Close(); }
 
 private:
@@ -57,7 +60,8 @@ private:
 	Level			logLevel;
 	Level			outLevel;
 	HANDLE			hFile;
-	HANDLE			hDeleteScript;
+	HANDLE			hCmdScript;
+	HANDLE			hPs1Script;
 };
 
 
