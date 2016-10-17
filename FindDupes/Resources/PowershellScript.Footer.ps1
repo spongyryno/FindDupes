@@ -1,5 +1,5 @@
 	"")
-$files = $files | ? { $_ -and (Test-Path $_ ) }
+$files = $files | ? { $_ -and (Test-Path -LiteralPath $_ ) }
 
 function _Delete
 {
@@ -7,7 +7,7 @@ function _Delete
 
 	if ($DoIt)
 	{
-		Remove-Item -Force -ErrorAction SilentlyContinue $File
+		Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $File
 		Write-Host -Fore Gray $File
 	}
 	else

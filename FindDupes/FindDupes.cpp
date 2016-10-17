@@ -5,12 +5,11 @@
 
 #include <utilities.h>
 #include <FileOnDisk.h>
+#include <HardLink.h>
 #include "Build_Increment.h"
 #include "Resource.h"
 
 #pragma comment(lib, "version.lib")
-
-#define VERSION "3.63.2016.0119.0"
 
 #define _LSTRINGIZE(x) L#x
 #define LSTRINGIZE(x) _LSTRINGIZE(x)
@@ -120,8 +119,10 @@ int _tmain(int argc, _TCHAR* argv[])
 	wchar_t szDupesLogFile[fileMax];
 	wchar_t szDupesCmdFile[fileMax];
 	wchar_t szDupesPs1File[fileMax];
+
 	char szRootFolder[fileMax];
 	char szInFolder[fileMax];
+
 
 	// options
 	bool trim = false;
@@ -130,6 +131,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	bool showHelp = false;
 	bool includeDeleteScript = false;
 	bool cleanCacheFiles = false;
+	bool verbose = false;
+	bool generateHashForAllFiles = false;
 
 	wchar_t szAppData[MAX_PATH];
 	HRESULT hr;
@@ -158,6 +161,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		fprintf(stderr, "Error: %d Could not open log file.\n", GetLastError());
 		return -1;
 	}
+
 	Logger::Get().Reset();
 
 	// get the default location of the root folder
@@ -216,6 +220,14 @@ int _tmain(int argc, _TCHAR* argv[])
 			{
 				cleanCacheFiles = true;
 			}
+			else if (L'v' == argv[i][1])
+			{
+				verbose = true;
+			}
+			else if (L'a' == argv[i][1])
+			{
+				generateHashForAllFiles = true;
+			}
 			else
 			{
 				Logger::Get().printf(Logger::Level::Error, "Unknown option: \"%s\"\n", argv[i]);
@@ -246,7 +258,33 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 	else if (cleanCacheFiles)
 	{
+		verboseprintf("Cleaning cache files...\n");
 		CleanCacheFiles(szRootFolder);
+	}
+	else if (generateHashForAllFiles)
+	{
+		verboseprintf("Generating hash for ALL files...\n");
+		const size_t itemsSizeReserve = 500000;
+		const size_t avgStringSizeToReserve = 128;
+
+		// create the files list
+		FileOnDiskSet files;
+
+		files.Items.reserve(itemsSizeReserve);
+		files.Strings.reserve(itemsSizeReserve * avgStringSizeToReserve);
+
+		{
+			TimeThis t("Read the directory structure");
+			files.QueryFileSystem(szRootFolder);
+			files.CheckStrings();
+			Logger::Get().printf(Logger::Level::Debug, "There are %s files in the directory structure.\n", comma(files.Items.size()));
+		}
+
+		// make sure all files that have the same size have updated hashes, and save the hash caches if necessary
+		{
+			TimeThis t("To update hashes");
+			files.UpdateHashedFiles(true, verbose);
+		}
 	}
 	else
 	{
@@ -255,6 +293,8 @@ int _tmain(int argc, _TCHAR* argv[])
 		{
 			if (includeDeleteScript)
 			{
+				verboseprintf("Finding dupes against an \"in\" file with a delete script...\n");
+
 				if (!Logger::Get().OpenCmdScript(szDupesCmdFile))
 				{
 					fprintf(stderr, "Error: %d Could not open log file.\n", GetLastError());
@@ -270,12 +310,20 @@ int _tmain(int argc, _TCHAR* argv[])
 				DWORD dwLen = 0;
 				Logger::Get().puts(Logger::Level::Ps1Script, reinterpret_cast<char *>(LoadResource(GetModuleHandle(nullptr), ID_BINARY, ID_PSHEADER, &dwLen)), dwLen);
 			}
+			else
+			{
+				verboseprintf("Finding dupes against an \"in\" file (no delete script)...\n");
+			}
 
 			if (!RelativeToFullpath(szInFolder, ARRAYSIZE(szInFolder)))
 			{
 				Logger::Get().printf(Logger::Level::Error, "Error: cannot get include folder.\n");
 				return -1;
 			}
+		}
+		else
+		{
+			verboseprintf("Finding all dupes (no \"in\" file)...\n");
 		}
 
 		const size_t itemsSizeReserve = 500000;
@@ -290,6 +338,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		// read the files on disk
 		{
 			TimeThis t("Read the directory structure");
+			verboseprintf("Reading the directory structure...\n");
 			files.QueryFileSystem(szRootFolder);
 			files.CheckStrings();
 			Logger::Get().printf(Logger::Level::Debug, "There are %s files in the directory structure.\n", comma(files.Items.size()));
@@ -315,6 +364,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			// read the disk
 			{
 				TimeThis t("Read the \"in\" directory structure");
+				verboseprintf("Reading the directory structure of the \"in\" folder...\n");
 				infiles.QueryFileSystem(szInFolder);
 				Logger::Get().printf(Logger::Level::Debug, "There are %s files in the \"in\" directory structure.\n", comma(infiles.Items.size()));
 			}
@@ -322,6 +372,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			// remove all "infiles" from "files" that may exist
 			{
 				TimeThis t("Remove \"in\" files from the rest");
+				verboseprintf("Removing infiles from files...\n");
 				files.RemoveSetFromSet(infiles);
 			}
 
@@ -331,6 +382,7 @@ int _tmain(int argc, _TCHAR* argv[])
 
 				{
 					TimeThis t("Merge all files into one uber set.");
+					verboseprintf("Merging all files into one uber set...\n");
 					allFiles.MergeFrom(files);
 					files.CheckStrings();
 					allFiles.CheckStrings();
@@ -339,11 +391,13 @@ int _tmain(int argc, _TCHAR* argv[])
 
 				{
 					TimeThis t("Hash necessary files.");
-					allFiles.UpdateHashedFiles();
+					verboseprintf("Hashing necessary files...\n");
+					allFiles.UpdateHashedFiles(false, verbose);
 				}
 
 				{
 					TimeThis t("Apply hashes from uber set to individual sets.");
+					verboseprintf("Applying hashes from uber set to individual sets...\n");
 					files.ApplyHashFrom(allFiles);
 					infiles.CheckStrings();
 					infiles.ApplyHashFrom(allFiles);
@@ -351,7 +405,8 @@ int _tmain(int argc, _TCHAR* argv[])
 
 				// we're done with all files
 				{
-					TimeThis t("Cleanup uber set.");
+					TimeThis t("Clean up uber set.");
+					verboseprintf("Cleaning up uber set...\n");
 					allFiles.Items.clear();
 					allFiles.Strings.clear();
 				}
@@ -436,7 +491,8 @@ int _tmain(int argc, _TCHAR* argv[])
 			// make sure all files that have the same size have updated hashes, and save the hash caches if necessary
 			{
 				TimeThis t("To update hashes");
-				files.UpdateHashedFiles();
+				verboseprintf("Updating hashes...\n");
+				files.UpdateHashedFiles(false, verbose);
 			}
 
 			// now, find the dupes
@@ -486,8 +542,10 @@ int _tmain(int argc, _TCHAR* argv[])
 					// now, loop until the "diff" set is empty
 					do
 					{
+						// get the hash of the first file in the set
 						const unsigned char *baseHash = &(*diff.begin()).Hash[0];
 
+						// put all the files in "diff" that match the hash into the "same" bucket
 						for_each(diff.begin(), diff.end(), [&](const FileOnDisk &file)
 						{
 							if (0 == memcmp(baseHash, file.Hash, sizeof(file.Hash)))
@@ -496,6 +554,7 @@ int _tmain(int argc, _TCHAR* argv[])
 							}
 						});
 
+						// remove the items that are in the "same" bucket from the "diff" bucket
 						for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
 						{
 							diff.erase(file);
@@ -506,11 +565,29 @@ int _tmain(int argc, _TCHAR* argv[])
 							duplicateFiles += same.size() - 1;
 							duplicateBytes += (same.size() - 1) * (same.begin()->Size);
 
+							long hardLinkChar = static_cast<long>('a');
+							std::unordered_map<unsigned long long, long> hardLinkMap;
+
+							for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
+							{
+								auto filePath = files.GetFilePath(file);
+								file.nNumberOfLinks = GetHardLinkCount(filePath, &file.nFileIndex);
+
+								if (hardLinkMap.find(file.nFileIndex) == hardLinkMap.end())
+								{
+									hardLinkMap[file.nFileIndex] = hardLinkChar;
+									++hardLinkChar;
+								}
+							});
+
 							Logger::Get().printf(Logger::Level::Dupes, "    ================================================================================================\n");
 
 							for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
 							{
-								Logger::Get().printf(Logger::Level::Dupes, "        %20s %s \"%s\"\n", comma(file.Size), Md5HashToString(file.Hash), files.GetFilePath(file));
+								auto filePath = files.GetFilePath(file);
+								long hardLinkCharLong = hardLinkMap[file.nFileIndex];
+								char hardLinkChar = hardLinkCharLong <= static_cast<long>('z') ? static_cast<char>(hardLinkCharLong) : '*';
+								Logger::Get().printf(Logger::Level::Dupes, "        %20s %s (%d,%c) \"%s\"\n", comma(file.Size), Md5HashToString(file.Hash), file.nNumberOfLinks, hardLinkChar, filePath);
 							});
 						}
 
@@ -534,6 +611,12 @@ int _tmain(int argc, _TCHAR* argv[])
 	{
 		printf("Cmd file: \"%S\"\n", szDupesCmdFile);
 		printf("Ps1 file: \"%S\"\n", szDupesPs1File);
+	}
+
+	if (IsDebuggerPresent())
+	{
+		while (_kbhit()) _getch();
+		_getch();
 	}
 
 	return 0;

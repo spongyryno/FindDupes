@@ -84,12 +84,16 @@ struct HashCacheHeader
 //=================================================================================================
 struct FileOnDisk
 {
-	bool			Hashed;
-	long long		Size;
-	FILETIME		Time;
-	unsigned char	Hash[16];
-	size_t			Name;
-	size_t			Path;
+	bool				Hashed;
+	long long			Size;
+	FILETIME			Time;
+	unsigned char		Hash[16];
+	size_t				Name;
+	size_t				Path;
+
+	// not in the MD5cache...
+	mutable DWORD   			nNumberOfLinks;
+	mutable unsigned long long	nFileIndex;
 };
 
 //=================================================================================================
@@ -178,11 +182,10 @@ public:
 	void RemoveSetFromSet(const FileOnDiskSet &infiles);
 
 	// calculate the hash for all files in the set that need it
-	void UpdateHashedFiles(void);
+	void UpdateHashedFiles(bool forceAll=false, bool verbose=false);
 
 	// read in from the file system (including relevant md5cache.bin files)
 	void QueryFileSystem(const char *pszRootPath);
-
 
 	//==============================================================================================
 	//==============================================================================================

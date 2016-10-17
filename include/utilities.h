@@ -1,5 +1,9 @@
 //=================================================================================================
 //=================================================================================================
+#define verboseprintf(fmt, ...) if (verbose) { Logger::Get().printf(Logger::Level::Info, fmt, __VA_ARGS__); }
+
+//=================================================================================================
+//=================================================================================================
 inline bool fexists(const WCHAR *filename)
 {
 	HANDLE hFile = CreateFile(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -51,6 +55,7 @@ public:
 	void Close();
 	void Reset();
 	void printf(Level level, const char *pszFormat, ...);
+
 	void puts(Level level, const char *pszString, DWORD dwLen);
 
 	Logger() : logLevel(Log_Default), outLevel(Out_Default), hFile(nullptr), hCmdScript(nullptr), hPs1Script(nullptr) {}

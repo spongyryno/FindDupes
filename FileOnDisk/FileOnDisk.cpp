@@ -5,6 +5,7 @@
 
 #include <utilities.h>
 #include <FileOnDisk.h>
+#include <HardLink.h>
 
 const size_t maxString = 1024;
 static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","md5cache.bin","folder.bin","folder.jpg",pszLocalCacheFileName };
@@ -13,7 +14,9 @@ static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","md5cache.bi
 //=================================================================================================
 static void ProcessFolder(const char *szName, FileOnDiskSet &files, int depth);
 static void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<char *,const MD5CacheItem *> *pumap);
-static bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash);
+static bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose);
+static bool GetFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose);
+static bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose);
 
 #define MAX_STRING 1024
 
@@ -114,6 +117,9 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 	}
 	else
 	{
+		// see if the file has any hard links
+
+
 		// add the file...
 		FileOnDisk file;
 
@@ -144,7 +150,6 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 
 	return;
 }
-
 
 
 //=================================================================================================
@@ -252,13 +257,47 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 }
 
 //==================================================================================================
+//==================================================================================================
+bool AreAllOfTheseHardLinksToOneAnother(const std::vector<char *> &filesToCheckForHardLinks)
+{
+	if (filesToCheckForHardLinks.size() < 2)
+	{
+		return true;
+	}
+
+	AutoCloseHandle	hfile1 = CreateFileA(filesToCheckForHardLinks[0], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	BY_HANDLE_FILE_INFORMATION info1 = {0};
+	GetFileInformationByHandle(hfile1, &info1);
+
+	for (size_t i=1; i<filesToCheckForHardLinks.size(); ++i)
+	{
+		AutoCloseHandle	hfile2 = CreateFileA(filesToCheckForHardLinks[i], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+
+		BY_HANDLE_FILE_INFORMATION info2 = {0};
+		GetFileInformationByHandle(hfile2, &info2);
+
+		if ((info1.nFileIndexHigh == info2.nFileIndexHigh) && (info1.nFileIndexLow == info2.nFileIndexLow))
+		{
+			// it's a link... don't give up
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+//==================================================================================================
 // UpdateHashedFiles
 //
 // Sort the input list, and go through the list and make sure that all files that have the same
 // size have a hash. If a hash needs to be calculated, calculate it, and add it to the hash cache
 //==================================================================================================
-void FileOnDiskSet::UpdateHashedFiles(void)
+void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 {
+	// sort on size
 	{
 		TimeThis t("Sort 2");
 		std::sort(this->Items.begin(), this->Items.end(), [&](FileOnDisk const &left, FileOnDisk const &right)
@@ -293,22 +332,59 @@ void FileOnDiskSet::UpdateHashedFiles(void)
 				continue;
 			}
 
-			bool hashNeeded = false;
+			bool hashNeeded = forceAll;
+			bool multipleFilesThatAreTheSameSize = false;
 
+			// is this item's size the same as the last one's size?
 			if ((i>0) && (file.Size == this->Items[i - 1].Size))
 			{
+				multipleFilesThatAreTheSameSize = true;
 				hashNeeded = true;
 			}
+			// is this item's size the same as the next one's size?
 			else if ((i + 1 < this->Items.size()) && (file.Size == this->Items[i + 1].Size))
 			{
+				multipleFilesThatAreTheSameSize = true;
 				hashNeeded = true;
+			}
+
+			if (multipleFilesThatAreTheSameSize && !forceAll)
+			{
+				// go through and see if all the files in our list that are the same size are ACTUALLY hard links to
+				// the same file
+				size_t iStartIndex = i;
+				while ((iStartIndex > 0) && (file.Size == this->Items[iStartIndex-1].Size))
+				{
+					--iStartIndex;
+				}
+
+				size_t iEndIndex = i;
+				while ((iEndIndex < this->Items.size()) && (file.Size == this->Items[iEndIndex].Size))
+				{
+					++iEndIndex;
+				}
+
+				std::vector<char *> filesToCheckForHardLinks;
+				filesToCheckForHardLinks.reserve(1+iEndIndex-iStartIndex);
+
+				for (size_t i2=iStartIndex; i2<iEndIndex; ++i2)
+				{
+					filesToCheckForHardLinks.push_back(this->GetFilePath(i2));
+				}
+
+				if (AreAllOfTheseHardLinksToOneAnother(filesToCheckForHardLinks))
+				{
+					verboseprintf("Skipping hash for \"%s\" because everything that's the same size is a hard link\n", this->GetFilePath(file));
+					hashNeeded = false;
+				}
 			}
 
 			if (hashNeeded)
 			{
 				TimeThis t("    Calulating hash");
-				file.Hashed = CalcFileMd5Hash(this->GetFilePath(file), file.Hash);
-				Logger::Get().printf(Logger::Level::Info, "(%12s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
+				verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
+				file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
+				Logger::Get().printf(Logger::Level::Info, "(%13s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
 				hashedCount++;
 				byteCount += file.Size;
 
@@ -562,16 +638,13 @@ inline BOOL SafeCryptDestroyHash(HCRYPTHASH &hHash)
 }
 
 
-
-
-
 //==================================================================================================
 // CalcFileMd5Hash
 //
 // Read in the contents of a file, calculating the MD5 cache of its contents, and return the
 // results
 //==================================================================================================
-bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash)
+bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
 {
 #if defined(_M_X64)
 	const int bufferSize = 1024*1024;
@@ -645,6 +718,29 @@ Cleanup:
 	SafeCloseHandle(hFile);
 
 	return result;
+}
+
+
+//==================================================================================================
+// GetFileMd5Hash
+//
+// Read in the contents of a file, calculating the MD5 cache of its contents, and return the
+// results
+//==================================================================================================
+bool GetFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
+{
+	// first, see if there are hard links...
+	std::vector<std::string> hardlinks = GetAllHardLinksA(szFileName);
+	for (auto i=hardlinks.begin(); i!=hardlinks.end(); ++i)
+	{
+		if (GetCachedHash(i->c_str(), pHash, verbose))
+		{
+			verboseprintf("No hash needed for \"%s\" because we got it from \"%s\"...\n", szFileName, i->c_str());
+			return true;
+		}
+	}
+
+	return CalcFileMd5Hash(szFileName, pHash, verbose);
 }
 
 
@@ -745,6 +841,77 @@ Cleanup:
 
 
 
+
+
+//==================================================================================================
+// GetCachedHash
+//
+// See if a file already has a valid hash
+//==================================================================================================
+bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose)
+{
+	bool result = false;
+	MD5Cache cache;
+	std::unordered_map<char *,const MD5CacheItem *> umap;
+	char szCacheFileName[maxString];
+
+	strncpy_s(szCacheFileName, szFileName, ARRAYSIZE(szCacheFileName));
+
+	// remove the filename
+	char *p = szCacheFileName;
+	while (*p) ++p;
+	while (p>szCacheFileName && (*p!='\\')) p--;
+	*p = 0;
+
+	size_t fileNameOffset = p - szCacheFileName + 1;
+
+	strcat_s(szCacheFileName, "\\");
+	strcat_s(szCacheFileName, pszLocalCacheFileName);
+
+	if (cache.Load(szCacheFileName))
+	{
+		for_each(cache.Items.begin(), cache.Items.end(), [&](MD5CacheItem &item)
+		{
+			umap[cache.GetFileName(item)] = &item;
+		});
+
+		// see if we have an entry for this item
+		char *pszFileNameOnly = const_cast<char *>(&szFileName[fileNameOffset]);
+		auto cacheitem = umap.find(pszFileNameOnly);
+		if (cacheitem != umap.end())
+		{
+			const MD5CacheItem *pcacheitem = umap[pszFileNameOnly];
+
+			// now, see if it's valid
+			HANDLE hFile = CreateFileA(szFileName, FILE_READ_ATTRIBUTES| FILE_READ_EA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
+
+			if (nullptr != hFile && INVALID_HANDLE_VALUE != hFile)
+			{
+				BY_HANDLE_FILE_INFORMATION fileInfo;
+				if (GetFileInformationByHandle(hFile, &fileInfo))
+				{
+					LARGE_INTEGER filesize;
+					filesize.HighPart = fileInfo.nFileSizeHigh;
+					filesize.LowPart = fileInfo.nFileSizeLow;
+
+					if ((filesize.QuadPart == pcacheitem->Size) && (fileInfo.ftLastWriteTime.dwHighDateTime == pcacheitem->Time.dwHighDateTime) && (fileInfo.ftLastWriteTime.dwLowDateTime == pcacheitem->Time.dwLowDateTime))
+					{
+						size_t hashsize = sizeof(pcacheitem->Hash);
+						memcpy(pHash, pcacheitem->Hash, hashsize);
+						result = true;
+					}
+					else
+					{
+						__nop();
+					}
+				}
+				CloseHandle(hFile);
+			}
+		}
+	}
+
+	return result;
+}
 
 
 

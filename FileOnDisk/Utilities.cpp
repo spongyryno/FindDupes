@@ -177,6 +177,7 @@ void Logger::puts(Level level, const char *pszString, DWORD dwLen)
 //=================================================================================================
 void Logger::printf(Level level, const char *pszFormat, ...)
 {
+	// does the current log level care about this message?
 	if (0 == (level & (this->outLevel | this->logLevel | Level::CmdScript | Level::Ps1Script)))
 	{
 		return;

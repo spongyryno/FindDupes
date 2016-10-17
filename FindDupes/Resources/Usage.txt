@@ -21,8 +21,10 @@ that folder. This is particularly useful if you want to delete a folder's
 duplicates.
 
 Options:
-    /n          Omit logog.
+    /n          Omit logo.
     /c          Clean md5cache.bin files.
+    /a          Generate md5cache entries for every file.
+    /v          Verbose console output.
     /i folder   Specify an "in" folder.
     /I folder   Specify an "in" folder, and generate a delete script.
 
