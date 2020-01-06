@@ -6,7 +6,7 @@ be read in, an MD5 hash is calculated of its contents, and that hash is used
 for the comparisons.
 
 In each folder where a file's contents needed to be hashed, a special hidden
-file called "md5cache.bin" is created that contains the hash (and file info)
+file called "md5cache.md5" is created that contains the hash (and file info)
 for all the files in that folder (that have been hashed). On subsequent runs,
 that cached hash value is used as long as the file hasn't changed, saving
 time, and allowing secondary passes to take only seconds, even in file systems
@@ -21,12 +21,13 @@ that folder. This is particularly useful if you want to delete a folder's
 duplicates.
 
 Options:
-    /n          Omit logo.
-    /c          Clean md5cache.bin files.
-    /a          Generate md5cache entries for every file.
-    /v          Verbose console output.
-    /i folder   Specify an "in" folder.
-    /I folder   Specify an "in" folder, and generate a delete script.
+    /n               Omit logo.
+    /c               Clean md5cache.md5 files.
+    /a               Generate md5cache entries for every file.
+    /v               Verbose console output.
+    /i folder        Specify an "in" folder.
+    /I folder        Specify an "in" folder, and generate a delete script.
+    /s folder folder Sync two folders.
 
 The "in" folder compares the contents of the current folder against the "in"
 folder. The only duplicates shown are files under the "in" folder that have
@@ -35,6 +36,9 @@ files under the "in" folder but nothing under the current folder that matches,
 nothing will be displayed, and likewise, dupes under the current folder that don't
 match something under the "in" folder will end up displaying nothing.
 
+When syncing two folders, files that are the same size and have the same hash
+will have their timestamp updated to match the newest of the two. Files that are
+the same size will get their hashes calculated.
 
 
 

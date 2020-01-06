@@ -10,6 +10,7 @@
 #include <tchar.h>
 #include <Windows.h>
 #include <Shlobj.h>
+#include <intrin.h>
 
 #include <stdio.h>
 #include <vector>
@@ -21,3 +22,5 @@
 #include <set>
 #include <regex>
 #include <array>
+
+

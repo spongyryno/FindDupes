@@ -25,7 +25,7 @@ function _Delete
 		}
 
 		$files_exist = $false
-		$exclusions = 'desktop.ini','thumbs.db','md5cache.bin','folder.bin','folder.jpg'
+		$exclusions = 'desktop.ini','thumbs.db','md5cache.bin','md5cache.md5','folder.bin','folder.jpg'
 		$folder.GetFiles() | ? { $exclusions -notcontains $_.Name } | % { $files_exist = $true }
 
 		if ($files_exist)

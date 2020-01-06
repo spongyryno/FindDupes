@@ -13,10 +13,12 @@
 #include <crtdbg.h>
 #endif
 
+// windows stuff
 #include <tchar.h>
 #include <Windows.h>
 #include <Shlobj.h>
 
+// std C++ stuff
 #include <stdio.h>
 #include <vector>
 #include <algorithm>
@@ -26,6 +28,9 @@
 #include <functional>
 #include <set>
 #include <regex>
+#include <string>
+#include <filesystem>
 
+// other
 #include <conio.h>
-
+#include <intrin.h>

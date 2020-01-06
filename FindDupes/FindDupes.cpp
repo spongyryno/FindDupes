@@ -119,9 +119,14 @@ int _tmain(int argc, _TCHAR* argv[])
 	wchar_t szDupesLogFile[fileMax];
 	wchar_t szDupesCmdFile[fileMax];
 	wchar_t szDupesPs1File[fileMax];
+	std::wstring _szDupesLogFile;
+	//path foo;
+	//std::experimental::filesystem::v1::path foo {R"(c:\foo.txt)"};
 
 	char szRootFolder[fileMax];
 	char szInFolder[fileMax];
+	char szSyncFolderLeft[fileMax];
+	char szSyncFolderRght[fileMax];
 
 
 	// options
@@ -133,6 +138,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	bool cleanCacheFiles = false;
 	bool verbose = false;
 	bool generateHashForAllFiles = false;
+	bool syncFolders = false;
 
 	wchar_t szAppData[MAX_PATH];
 	HRESULT hr;
@@ -190,7 +196,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	//=============================================================================================
 	// parse command-line options
 	//=============================================================================================
-	for (int i = 1; i < argc; i++)
+	for (int i = 1; i < argc; ++i)
 	{
 		if ((L'-' == argv[i][0]) || (L'/' == argv[i][0]))
 		{
@@ -204,7 +210,7 @@ int _tmain(int argc, _TCHAR* argv[])
 					return -1;
 				}
 
-				i++;
+				++i;
 				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, szInFolder, sizeof(szInFolder), nullptr, nullptr);
 				infile = true;
 			}
@@ -223,10 +229,39 @@ int _tmain(int argc, _TCHAR* argv[])
 			else if (L'v' == argv[i][1])
 			{
 				verbose = true;
+				Logger::Get().SetOutLevel(Logger::Level::All);
 			}
 			else if (L'a' == argv[i][1])
 			{
 				generateHashForAllFiles = true;
+			}
+			else if (L's' == argv[i][1])
+			{
+				if (argc < i + 2)
+				{
+					Logger::Get().printf(Logger::Level::Error, "Error: missing args\n");
+					return -1;
+				}
+
+				++i;
+				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, szSyncFolderLeft, sizeof(szSyncFolderLeft), nullptr, nullptr);
+
+				++i;
+				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, szSyncFolderRght, sizeof(szSyncFolderRght), nullptr, nullptr);
+				syncFolders = true;
+
+				if (!RelativeToFullpath(szSyncFolderLeft, ARRAYSIZE(szSyncFolderLeft)))
+				{
+					Logger::Get().printf(Logger::Level::Error, "Error: could not resolve \"%s\"\n", szSyncFolderLeft);
+					return -1;
+				}
+
+				if (!RelativeToFullpath(szSyncFolderRght, ARRAYSIZE(szSyncFolderRght)))
+				{
+					Logger::Get().printf(Logger::Level::Error, "Error: could not resolve \"%s\"\n", szSyncFolderRght);
+					return -1;
+				}
+
 			}
 			else
 			{
@@ -247,7 +282,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (logo)
 	{
 		std::wstring version = GetLocalBinaryVersionString();
-		Logger::Get().printf(Logger::Level::Error, "SpongySoft FindDupes version %S (" __TIMESTAMP__ ") (" BUILD_DATE_STRING ") (Compiled for %d-bit)\nCopyright (c) 2000-2014 SpongySoft.\nFor more information, visit http://www.spongysoft.com\n", version.c_str(), sizeof(void *)* 8);
+		Logger::Get().printf(Logger::Level::Error, "SpongySoft FindDupes version %S (" __TIMESTAMP__ ") (" BUILD_DATE_STRING ") (Compiled for %d-bit)\nCopyright (c) 2000-2019 SpongySoft.\nFor more information, visit http://www.spongysoft.com\n", version.c_str(), sizeof(void *)* 8);
 	}
 
 	if (showHelp)
@@ -285,6 +320,220 @@ int _tmain(int argc, _TCHAR* argv[])
 			TimeThis t("To update hashes");
 			files.UpdateHashedFiles(true, verbose);
 		}
+	}
+	else if (syncFolders)
+	{
+		verboseprintf("Syncing folders \"%s\" and \"%s\".\n", szSyncFolderLeft, szSyncFolderRght);
+		const size_t itemsSizeReserve = 500000;
+		const size_t avgStringSizeToReserve = 128;
+
+		// create the files list
+		FileOnDiskSet left;
+		FileOnDiskSet rght;
+
+		left.Items.reserve(itemsSizeReserve);
+		left.Strings.reserve(itemsSizeReserve * avgStringSizeToReserve);
+
+		rght.Items.reserve(itemsSizeReserve);
+		rght.Strings.reserve(itemsSizeReserve * avgStringSizeToReserve);
+
+		{
+			TimeThis t("Read the first directory structure");
+			verboseprintf("Reading the first directory structure...\n");
+			left.QueryFileSystem(szSyncFolderLeft, true);
+			left.CheckStrings();
+			Logger::Get().printf(Logger::Level::Debug, "There are %s files in the directory structure.\n", comma(left.Items.size()));
+		}
+
+		{
+			TimeThis t("Read the second directory structure");
+			verboseprintf("Reading the second directory structure...\n");
+			rght.QueryFileSystem(szSyncFolderRght, true);
+			rght.CheckStrings();
+			Logger::Get().printf(Logger::Level::Debug, "There are %s files in the directory structure.\n", comma(rght.Items.size()));
+		}
+
+		std::unordered_map<Path, FileOnDisk *> umap;
+		umap.reserve(left.Items.size());
+
+		for (auto &item : left.Items)
+		{
+			auto lname = left.GetFileName(item);
+			auto lpath = left.GetFilePath(item);
+			auto lsubp = left.GetSubPathName(item);
+
+			auto subpathname = lsubp;
+			umap[subpathname] = &item;
+		}
+
+		// validation
+		for (auto &i : umap)
+		{
+			auto key = i.first;
+			auto &val = *(i.second);
+
+			auto lname = left.GetFileName(val);
+			auto lpath = left.GetFilePath(val);
+			auto lsubp = left.GetSubPathName(val);
+
+			__nop();
+		}
+
+		size_t leftNumFiles = left.Items.size();
+		size_t rghtNumFiles = rght.Items.size();
+		size_t bothNumFiles = 0;
+
+		for (auto &item : rght.Items)
+		{
+			auto rname = rght.GetFileName(item);
+			auto rpath = rght.GetFilePath(item);
+			auto rsubp = rght.GetSubPathName(item);
+
+			//if (0 == strcmp(rsubp, R"(Software\TurboTax\2013\TurboTax 2013\Runtime\license.rtf)"))
+			if (0 == strcmp(rsubp, R"(Runtime\license.rtf)"))
+			{
+				__nop();
+			}
+			else
+			{
+				__nop();
+			}
+
+			auto subpathname = rsubp;
+			auto leftitemref = umap.find(subpathname);
+			if (leftitemref != umap.end())
+			{
+				++bothNumFiles;
+
+				auto &leftitem = *(leftitemref->second);
+
+				auto lname = left.GetFileName(leftitem);
+				auto lpath = left.GetFilePath(leftitem);
+				auto lsubp = left.GetSubPathName(leftitem);
+
+				// found!
+				if (leftitem.Size == item.Size)
+				{
+					// same size...
+					auto lefttime_cached = FileTimeToUInt64(leftitem.Time);
+					auto rghttime_cached = FileTimeToUInt64(item.Time);
+
+#ifdef _DEBUG
+//#define VALIDATE_TIMESTAMPS
+#endif
+#ifdef VALIDATE_TIMESTAMPS
+					auto lefttime_actual = FileTimeToUInt64(GetFileTimeStamp(lpath));
+					auto rghttime_actual = FileTimeToUInt64(GetFileTimeStamp(rpath));
+
+					if (lefttime_cached != lefttime_actual)
+					{
+						Logger::Get().printf(Logger::Level::Error, "Timestamp mismatch between cache file and actual file: \"%s\".\n", lpath);
+					}
+
+					if (rghttime_cached != rghttime_actual)
+					{
+						Logger::Get().printf(Logger::Level::Error, "Timestamp mismatch between cache file and actual file: \"%s\".\n", rpath);
+					}
+#endif
+
+					if (leftitem.Hashed)
+					{
+						if (item.Hashed)
+						{
+							// both hashed...
+							if (leftitem.Hash == item.Hash)
+							{
+								// same hash!!
+								if (lefttime_cached > rghttime_cached)
+								{
+									// same hash, right side needs a timestamp update
+									__nop();
+								}
+								else if (lefttime_cached < rghttime_cached)
+								{
+									// same hash, left side needs a timestamp update
+									__nop();
+								}
+								else
+								{
+									// same hash, nothing to do
+									__nop();
+								}
+							}
+							else
+							{
+								// different hashes and timestamps, but the same size!!
+								__nop();
+							}
+						}
+						else
+						{
+							// check the ACTUAL timestamps on the files
+							// same size, left item is hashed, right item is not
+							if (lefttime_cached > rghttime_cached)
+							{
+								__nop();
+							}
+							else if (lefttime_cached < rghttime_cached)
+							{
+								__nop();
+							}
+							else
+							{
+								Logger::Get().printf(Logger::Level::Info, "Copying hash from:\n    \"%s\" to\n    \"%s\"\n", lpath, rpath);
+
+								item.Hash = leftitem.Hash;
+								item.Hashed = true;
+								rght.UpdateFile(item);
+							}
+						}
+					}
+					else
+					{
+						if (item.Hashed)
+						{
+							if (lefttime_cached > rghttime_cached)
+							{
+								__nop();
+							}
+							else if (lefttime_cached < rghttime_cached)
+							{
+								__nop();
+							}
+							else
+							{
+								Logger::Get().printf(Logger::Level::Info, "Copying hash from:\n    \"%s\" to\n    \"%s\"\n", rpath, lpath);
+
+								leftitem.Hash = item.Hash;
+								leftitem.Hashed = true;
+								left.UpdateFile(leftitem);
+							}
+						}
+						else
+						{
+							// same size, neither is hashed
+							__nop();
+						}
+					}
+				}
+				else
+				{
+					// different sizes
+					__nop();
+				}
+			}
+			else
+			{
+				// file on right size doesn't exist in the left
+				__nop();
+			}
+		}
+
+		Logger::Get().printf(Logger::Level::Info, "Number of files on left:       %15s\n", comma(leftNumFiles));
+		Logger::Get().printf(Logger::Level::Info, "Number of files on right:      %15s\n", comma(rghtNumFiles));
+		Logger::Get().printf(Logger::Level::Info, "Number of files only on left:  %15s\n", comma(leftNumFiles-bothNumFiles));
+		Logger::Get().printf(Logger::Level::Info, "Number of files only on right: %15s\n", comma(rghtNumFiles-bothNumFiles));
+		Logger::Get().printf(Logger::Level::Info, "Number of files in both:       %15s\n", comma(bothNumFiles));
 	}
 	else
 	{
@@ -417,11 +666,11 @@ int _tmain(int argc, _TCHAR* argv[])
 
 			{
 				size_t index = 0;
-				for_each(files.Items.begin(), files.Items.end(), [&](const FileOnDisk &file)
+				for (auto &file : files.Items)
 				{
 					umap[file.Size].push_back(index);
-					index++;
-				});
+					++index;
+				}
 			}
 
 			// sort the "infiles" on size
@@ -435,7 +684,7 @@ int _tmain(int argc, _TCHAR* argv[])
 				return left.Size > right.Size;
 			});
 
-			for_each(infiles.Items.begin(), infiles.Items.end(), [&](const FileOnDisk &infile)
+			for (auto &infile : infiles.Items)
 			{
 				if (umap.find(infile.Size) != umap.end())
 				{
@@ -444,14 +693,14 @@ int _tmain(int argc, _TCHAR* argv[])
 
 					std::vector<size_t> &indices = umap[infile.Size];
 
-					for_each(indices.begin(), indices.end(), [&](size_t index)
+					for (auto &index : indices)
 					{
 						const FileOnDisk &file = files.Items[index];
-						if (0 == memcmp(infile.Hash, file.Hash, sizeof(infile.Hash)))
+						if (infile.Hash == file.Hash)
 						{
 							hashMatch = true;
 						}
-					});
+					}
 
 					if (hashMatch)
 					{
@@ -462,23 +711,23 @@ int _tmain(int argc, _TCHAR* argv[])
 						}
 
 						Logger::Get().printf(Logger::Level::Dupes, "====================================================================================================\n");
-						Logger::Get().printf(Logger::Level::Dupes, "        %20s %s \"%s\"\n", comma(infile.Size), Md5HashToString(infile.Hash), infiles.GetFilePath(infile));
+						Logger::Get().printf(Logger::Level::Dupes, "        %20s %s \"%s\"\n", comma(infile.Size), infile.Hash.ToString(), infiles.GetFilePath(infile));
 
-						duplicateFiles ++;
+						++duplicateFiles;
 						duplicateBytes += infile.Size;
 
-						for_each(indices.begin(), indices.end(), [&](size_t index)
+						for (auto &index : indices)
 						{
 							const FileOnDisk &file = files.Items[index];
 
-							if (0 == memcmp(infile.Hash, file.Hash, sizeof(infile.Hash)))
+							if (infile.Hash == file.Hash)
 							{
-								Logger::Get().printf(Logger::Level::Dupes, "        %20s %s \"%s\"\n", comma(file.Size), Md5HashToString(file.Hash), files.GetFilePath(file));
+								Logger::Get().printf(Logger::Level::Dupes, "        %20s %s \"%s\"\n", comma(file.Size), file.Hash.ToString(), files.GetFilePath(file));
 							}
-						});
+						}
 					}
 				}
-			});
+			}
 
 			if (includeDeleteScript)
 			{
@@ -499,104 +748,108 @@ int _tmain(int argc, _TCHAR* argv[])
 			{
 				TimeThis t("To find dupes");
 
-				// go through each item. we cannot do a "for_each" here, since we may skip some
-				for (size_t i = 0; i<files.Items.size() - 1;)
+				// go through each item. we cannot do a "for each" here, since we may skip some
+				if (!files.Items.empty())
 				{
-					FileOnDisk &file = files.Items[i];
-
-					// quit when we reach zero-byte sized files
-					if (file.Size == 0)
+					for (size_t i = 0; i<files.Items.size() - 1;)
 					{
-						break;
-					}
+						FileOnDisk &file = files.Items[i];
 
-					// now, loop through every file that is the same size
-					size_t j = i + 1;
-					while (j<files.Items.size() && (files.Items[j].Size == file.Size))
-					{
-						j++;
-					}
-
-					if ((j - i) == 1)
-					{
-						// this file has no file-size match, so it can't be a duplicate, so continue on
-						++i;
-						continue;
-					}
-
-					// now each file from i..j-1 are all the same size
-					auto PathCompare = [&](const FileOnDisk&left, const FileOnDisk&right)->bool
-					{
-						return (0 > _stricmp(files.GetFilePath(left), files.GetFilePath(right)));
-					};
-
-					std::set<FileOnDisk, std::function<bool(const FileOnDisk&left, const FileOnDisk&right)> > same(PathCompare);
-					std::set<FileOnDisk, std::function<bool(const FileOnDisk&left, const FileOnDisk&right)> > diff(PathCompare);
-
-					// leave the "same" set empty, but put everything in the "diff" set to start with
-					for (size_t i0 = i; i0 < j; i0++)
-					{
-						diff.insert(files.Items[i0]);
-					}
-
-					// now, loop until the "diff" set is empty
-					do
-					{
-						// get the hash of the first file in the set
-						const unsigned char *baseHash = &(*diff.begin()).Hash[0];
-
-						// put all the files in "diff" that match the hash into the "same" bucket
-						for_each(diff.begin(), diff.end(), [&](const FileOnDisk &file)
+						// quit when we reach zero-byte sized files
+						if (file.Size == 0)
 						{
-							if (0 == memcmp(baseHash, file.Hash, sizeof(file.Hash)))
-							{
-								same.insert(file);
-							}
-						});
-
-						// remove the items that are in the "same" bucket from the "diff" bucket
-						for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
-						{
-							diff.erase(file);
-						});
-
-						if (same.size()>1)
-						{
-							duplicateFiles += same.size() - 1;
-							duplicateBytes += (same.size() - 1) * (same.begin()->Size);
-
-							long hardLinkChar = static_cast<long>('a');
-							std::unordered_map<unsigned long long, long> hardLinkMap;
-
-							for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
-							{
-								auto filePath = files.GetFilePath(file);
-								file.nNumberOfLinks = GetHardLinkCount(filePath, &file.nFileIndex);
-
-								if (hardLinkMap.find(file.nFileIndex) == hardLinkMap.end())
-								{
-									hardLinkMap[file.nFileIndex] = hardLinkChar;
-									++hardLinkChar;
-								}
-							});
-
-							Logger::Get().printf(Logger::Level::Dupes, "    ================================================================================================\n");
-
-							for_each(same.begin(), same.end(), [&](const FileOnDisk &file)
-							{
-								auto filePath = files.GetFilePath(file);
-								long hardLinkCharLong = hardLinkMap[file.nFileIndex];
-								char hardLinkChar = hardLinkCharLong <= static_cast<long>('z') ? static_cast<char>(hardLinkCharLong) : '*';
-								Logger::Get().printf(Logger::Level::Dupes, "        %20s %s (%d,%c) \"%s\"\n", comma(file.Size), Md5HashToString(file.Hash), file.nNumberOfLinks, hardLinkChar, filePath);
-							});
+							break;
 						}
 
-						same.clear();
+						// now, loop through every file that is the same size
+						size_t j = i + 1;
+						while (j<files.Items.size() && (files.Items[j].Size == file.Size))
+						{
+							++j;
+						}
 
-					} while (diff.size() > 0);
+						if ((j - i) == 1)
+						{
+							// this file has no file-size match, so it can't be a duplicate, so continue on
+							++i;
+							continue;
+						}
+
+						// now each file from i..j-1 are all the same size
+						auto PathCompare = [&](const FileOnDisk&left, const FileOnDisk&right)->bool
+						{
+							return (0 > _stricmp(files.GetFilePath(left), files.GetFilePath(right)));
+						};
+
+						std::set<FileOnDisk, std::function<bool(const FileOnDisk&left, const FileOnDisk&right)> > same(PathCompare);
+						std::set<FileOnDisk, std::function<bool(const FileOnDisk&left, const FileOnDisk&right)> > diff(PathCompare);
+
+						// leave the "same" set empty, but put everything in the "diff" set to start with
+						for (size_t i0 = i; i0 < j; ++i0)
+						{
+							diff.insert(files.Items[i0]);
+						}
+
+						// now, loop until the "diff" set is empty
+						do
+						{
+							// get the hash of the first file in the set, which is the item we're going to compare with
+							auto &compareitem = *diff.begin();
+
+							// put all the files in "diff" that match the hash into the "same" bucket
+							for (auto &file : diff)
+							{
+								if (compareitem.Hash == file.Hash)
+								{
+									same.insert(file);
+								}
+							}
+
+							// remove the items that are in the "same" bucket from the "diff" bucket
+							for (auto &file : same)
+							{
+								diff.erase(file);
+							}
+
+							// we will always have the "compareitem", but do we have more than just that one?
+							if (same.size()>1)
+							{
+								duplicateFiles += same.size() - 1;
+								duplicateBytes += (same.size() - 1) * (same.begin()->Size);
+
+								long hardLinkChar = static_cast<long>('a');
+								std::unordered_map<unsigned long long, long> hardLinkMap;
+
+								for (auto &file : same)
+								{
+									auto filePath = files.GetFilePath(file);
+									file.nNumberOfLinks = GetHardLinkCount(filePath, &file.nFileIndex);
+
+									if (hardLinkMap.find(file.nFileIndex) == hardLinkMap.end())
+									{
+										hardLinkMap[file.nFileIndex] = hardLinkChar;
+										++hardLinkChar;
+									}
+								}
+
+								Logger::Get().printf(Logger::Level::Dupes, "    ================================================================================================\n");
+
+								for (auto &file : same)
+								{
+									auto filePath = files.GetFilePath(file);
+									long hardLinkCharLong = hardLinkMap[file.nFileIndex];
+									char hardLinkChar = hardLinkCharLong <= static_cast<long>('z') ? static_cast<char>(hardLinkCharLong) : '*';
+									Logger::Get().printf(Logger::Level::Dupes, "        %20s %s (%d,%c) \"%s\"\n", comma(file.Size), file.Hash.ToString(), file.nNumberOfLinks, hardLinkChar, filePath);
+								}
+							}
+
+							same.clear();
+
+						} while (diff.size() > 0);
 
 
-					i = j;
+						i = j;
+					}
 				}
 			}
 		}
@@ -613,11 +866,13 @@ int _tmain(int argc, _TCHAR* argv[])
 		printf("Ps1 file: \"%S\"\n", szDupesPs1File);
 	}
 
+#ifdef _DEBUG
 	if (IsDebuggerPresent())
 	{
 		while (_kbhit()) _getch();
 		_getch();
 	}
+#endif
 
 	return 0;
 }

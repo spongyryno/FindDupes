@@ -179,9 +179,9 @@ inline std::vector<std::string> GetAllHardLinksA(const char *pszFileName)
 	// allocate enough space
 	results.reserve(wresults.size());
 
-	for (auto i=wresults.begin(); i!=wresults.end(); ++i)
+	for (auto &i : wresults)
 	{
-		results.push_back(UnicodeToAnsi(*i));
+		results.push_back(UnicodeToAnsi(i));
 	}
 
 	return results;

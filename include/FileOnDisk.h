@@ -1,25 +1,155 @@
 #define FILEONDISK_VERSION		0x00000100
 
 //=================================================================================================
-// Given a C string (case-insensitive char *) representing a path, get the hash value of it (the
-// hash value must be the same for any two paths that are equal even if there are case differences)
+// Path represents a path. It's just a case-insensitive string
+//
+// We use it instead of a "char *" because it abstracts what it is, and prevents the compiler
+// from using any of a variation of "char *" operators to determine equality and compute hashes
+// for hashtables
+//
+// Without it, we would need to implement:
+//
+// => 48 different specialized template "std::equal_to" operator() functions
+// => 6 different specialized template "std::hash" operation() functions
+//
 //=================================================================================================
-inline size_t PathHash(const char *pszPath)
+class Path
 {
-	const size_t maxpath = 2048;
+private:
+	//=============================================================================================
+	// Internal data
+	//=============================================================================================
+	const char *_p;
 
-	assert(strlen(pszPath) < maxpath);
 
-	char lowercase[maxpath];
-	char *p = lowercase;
+public:
+	//=============================================================================================
+	// Constructors...
+	//=============================================================================================
+	Path() : _p(nullptr) {}
+	Path(const char *p) : _p(p) {}
+	Path(char *p) : _p(p) {}
 
-	while (*pszPath && ((p-lowercase)<maxpath))
+	//=============================================================================================
+	// Destructor
+	//=============================================================================================
+	~Path() = default;
+
+	//=============================================================================================
+	// Hash computation for use in an unordered_map
+	//
+	// The hash value must be the same for any two paths that are equal even if
+	// there are case differences
+	//=============================================================================================
+	inline size_t GetHash() const
 	{
-		*p++ = tolower(*pszPath++);
+		const size_t maxpath = 2048;
+
+		assert(strlen(_p) < maxpath);
+
+		char lowercase[maxpath];
+		char *p = lowercase;
+		const char *pszPath = _p;
+
+		while (*pszPath && ((p-lowercase)<maxpath))
+		{
+			*p++ = tolower(*pszPath++);
+		}
+
+		//return std::_Hash_seq(reinterpret_cast<unsigned char *>(lowercase), p - lowercase);
+		return std::_Hash_array_representation(reinterpret_cast<unsigned char *>(lowercase), p - lowercase);
 	}
 
-	return std::_Hash_seq(reinterpret_cast<unsigned char *>(lowercase), p-lowercase);
-}
+	//=============================================================================================
+	// equality operators
+	//=============================================================================================
+	inline bool operator ==(const Path &other) const
+	{
+		return (0 == _stricmp(this->_p, other._p));
+	}
+};
+
+//=================================================================================================
+// Md5Hash
+//
+// A class representing an MD5 hash, which is a 16-byte blob.
+//=================================================================================================
+class Md5Hash
+{
+public:
+	unsigned char	_data[16];
+
+	//=============================================================================================
+	// constructors
+	//=============================================================================================
+	Md5Hash()
+	{
+		memset(_data, 0, sizeof(_data));
+	}
+
+	Md5Hash(const Md5Hash &other)
+	{
+		memcpy(_data, other._data, sizeof(_data));
+	}
+
+	Md5Hash(Md5Hash &&other)
+	{
+		memcpy(_data, other._data, sizeof(_data));
+	}
+
+
+	//=============================================================================================
+	// equality operators
+	//=============================================================================================
+	inline bool operator ==(const Md5Hash& other) const
+	{
+		return (0 == memcmp(_data, other._data, sizeof(_data)));
+	}
+
+
+	//=============================================================================================
+	// assignment operators
+	//=============================================================================================
+	inline void operator =(const Md5Hash &other)
+	{
+		memcpy(_data, other._data, sizeof(_data));
+	}
+
+	inline void operator =(Md5Hash &&other)
+	{
+		memcpy(_data, other._data, sizeof(_data));
+	}
+
+
+	//=============================================================================================
+	// Other functions
+	//=============================================================================================
+	inline char *ToString() const
+	{
+		const int numStrings = 8; // must be a power of two!!
+		const int stringLength = 33;
+		static char string[numStrings][stringLength];
+		static int	index=-1;
+		static const char hex[] = "0123456789ABCDEF";
+
+		// make sure the numstrings is a power of two
+		C_ASSERT(0 == (numStrings & (numStrings - 1)));
+
+		index = (index+1)&(numStrings-1);
+
+		char *p = string[index];
+
+		for (int i=0 ; i<16 ; i++)
+		{
+			*p++ = hex[_data[i] >> 4];
+			*p++ = hex[_data[i] & 0x0F];
+		}
+
+		*p++ = 0;
+
+		return string[index];
+	}
+};
 
 //=================================================================================================
 // Functions for allowing the std::unordered map to use C-style strings as their keys, and in
@@ -27,38 +157,11 @@ inline size_t PathHash(const char *pszPath)
 //=================================================================================================
 namespace std
 {
-	template <> struct hash<const char *> : public unary_function<const char *, size_t>
+	template <> struct hash<Path>
 	{
-		size_t operator()(const char * &value) const
-		{
-			return PathHash(value);
-		}
+		size_t operator()(Path &p) const { return p.GetHash(); }
+		size_t operator()(const Path &p) const { return p.GetHash(); }
 	};
-
-	template <> struct equal_to<const char *> : public unary_function<const char *, bool>
-	{
-		bool operator()(const char *&x, const char *&y) const
-		{
-			return (0 == _stricmp(x, y));
-		}
-	};
-
-	template <> struct hash<char *> : public unary_function<char *, size_t>
-	{
-		size_t operator()(char * value) const
-		{
-			return PathHash(value);
-		}
-	};
-
-	template <> struct equal_to<char *> : public unary_function<char *, bool>
-	{
-		bool operator()(char *x, char *y) const
-		{
-			return (0 == _stricmp(x, y));
-		}
-	};
-
 } // namespace std
 
 
@@ -84,14 +187,15 @@ struct HashCacheHeader
 //=================================================================================================
 struct FileOnDisk
 {
-	bool				Hashed;
-	long long			Size;
-	FILETIME			Time;
-	unsigned char		Hash[16];
-	size_t				Name;
-	size_t				Path;
+	bool						Hashed;
+	long long					Size;
+	FILETIME					Time;
+	Md5Hash						Hash;
+	size_t						Name;
+	size_t						Path;
 
-	// not in the MD5cache...
+	// not in the Md5Cache...
+	size_t						SubPath;
 	mutable DWORD   			nNumberOfLinks;
 	mutable unsigned long long	nFileIndex;
 };
@@ -102,38 +206,11 @@ struct FileOnDiskSet
 {
 	std::vector<FileOnDisk>		Items;
 	std::vector<char>			Strings;
+	size_t						RootPathLength;
 
-	inline char *GetFilePath(size_t index)
-	{
-		assert(index < this->Items.size());
-		assert(this->Items[index].Path < this->Strings.size());
-
-		return &this->Strings[this->Items[index].Path];
-	}
-
-	inline char *GetFilePath(const FileOnDisk &file)
-	{
-		//assert(&file >= &this->Items[0]);
-		//assert(&file <= &this->Items[this->Items.size()-1]);
-		assert(file.Path < this->Strings.size());
-
-		return &this->Strings[file.Path];
-	}
-
-	inline char *GetFileName(size_t index)
-	{
-		assert(index < this->Items.size());
-		assert(this->Items[index].Name < this->Strings.size());
-
-		return &this->Strings[this->Items[index].Name];
-	}
-
-	inline char *GetFileName(const FileOnDisk &file)
-	{
-		assert(file.Name < this->Strings.size());
-		return &this->Strings[file.Name];
-	}
-
+	//=============================================================================================
+	// Const/non versions
+	//=============================================================================================
 	inline const char *GetFilePath(size_t index) const
 	{
 		assert(index < this->Items.size());
@@ -160,6 +237,19 @@ struct FileOnDiskSet
 		return &this->Strings[file.Name];
 	}
 
+	inline const char *GetSubPathName(size_t index) const
+	{
+		assert(index < this->Items.size());
+		assert(this->Items[index].SubPath < this->Strings.size());
+		return &this->Strings[this->Items[index].SubPath];
+	}
+
+	inline const char *GetSubPathName(const FileOnDisk &file) const
+	{
+		assert(file.SubPath < this->Strings.size());
+		return &this->Strings[file.SubPath];
+	}
+
 
 	void AddPathToStrings(FileOnDisk &file, const char *szPath, size_t nameOffset)
 	{
@@ -184,54 +274,56 @@ public:
 	// calculate the hash for all files in the set that need it
 	void UpdateHashedFiles(bool forceAll=false, bool verbose=false);
 
-	// read in from the file system (including relevant md5cache.bin files)
-	void QueryFileSystem(const char *pszRootPath);
+	// read in from the file system (including relevant md5cache.md5 files)
+	void QueryFileSystem(const char *pszRootPath, bool clean=false);
+
+	// update a single one
+	bool UpdateFile(const FileOnDisk &file);
 
 	//==============================================================================================
 	//==============================================================================================
 	inline void CheckStrings(void)
 	{
 #ifdef _DEBUG
-		for_each(this->Items.begin(), this->Items.end(), [&](const FileOnDisk &file)
+		for (auto &file : this->Items)
 		{
 			if (file.Path > this->Strings.size())
 			{
 				assert(0);
 			}
-		});
+		}
 #endif
 	}
 };
 
 //=================================================================================================
 //=================================================================================================
-struct MD5CacheItem
+struct Md5CacheItem
 {
 	long long			Size;
 	FILETIME			Time;
-	unsigned char		Hash[16];
+	Md5Hash				Hash;
 	unsigned long		Name;
 	unsigned long		Filler;
 
-	MD5CacheItem(const FileOnDisk &file)
+	Md5CacheItem(const FileOnDisk &file)
 	{
 		this->Size = file.Size;
 		this->Time = file.Time;
-		memcpy(this->Hash, file.Hash, sizeof(this->Hash));
+		this->Hash = file.Hash;
 	}
 
-	MD5CacheItem(){}
+	Md5CacheItem(){}
 };
 
 //=================================================================================================
 //=================================================================================================
-struct MD5Cache
+struct Md5Cache
 {
-	std::vector<MD5CacheItem>	Items;
+	std::vector<Md5CacheItem>	Items;
 	std::vector<char>			Strings;
 
 	bool Load(const char *pszFileName);
-	bool Read(const char *pszFileName) { return this->Load(pszFileName);}
 	bool Save(const char *pszFileName);
 
 	inline char *GetFileName(size_t index)
@@ -242,7 +334,7 @@ struct MD5Cache
 		return &this->Strings[this->Items[index].Name];
 	}
 
-	inline char *GetFileName(const MD5CacheItem &file)
+	inline char *GetFileName(const Md5CacheItem &file)
 	{
 		//assert(&file >= &this->Items[0]);
 		//assert(&file <= &this->Items[this->Items.size()-1]);
@@ -256,6 +348,7 @@ struct MD5Cache
 
 //==================================================================================================
 //==================================================================================================
-__declspec(selectany) const char * pszLocalCacheFileName = "md5cache.bin";
+__declspec(selectany) const char * pszLocalCacheFileName = "md5cache.md5";
+__declspec(selectany) const char * pszOldLocalCacheFileName = "md5cache.bin";
 
 extern void CleanCacheFiles(const char *pszRootPath);

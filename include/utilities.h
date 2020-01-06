@@ -4,9 +4,19 @@
 
 //=================================================================================================
 //=================================================================================================
-inline bool fexists(const WCHAR *filename)
+
+//=================================================================================================
+//=================================================================================================
+template<typename _Ty> inline bool fexists(const _Ty *filename)
 {
-	HANDLE hFile = CreateFile(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	static_assert(0);
+}
+
+//=================================================================================================
+//=================================================================================================
+template<> inline bool fexists<wchar_t>(const wchar_t *filename)
+{
+	HANDLE hFile = CreateFileW(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if ((nullptr != hFile) && (INVALID_HANDLE_VALUE != hFile))
 	{
 		CloseHandle(hFile);
@@ -16,8 +26,50 @@ inline bool fexists(const WCHAR *filename)
 	return false;
 }
 
+//=================================================================================================
+//=================================================================================================
+template<> inline bool fexists<char>(const char *filename)
+{
+	HANDLE hFile = CreateFileA(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	if ((nullptr != hFile) && (INVALID_HANDLE_VALUE != hFile))
+	{
+		CloseHandle(hFile);
+		return true;
+	}
 
+	return false;
+}
 
+//=================================================================================================
+//=================================================================================================
+inline FILETIME GetFileTimeStamp(const char *pszFilePath)
+{
+	FILETIME null{ 0 };
+
+	HANDLE hFile = CreateFileA(pszFilePath, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	if ((nullptr != hFile) && (INVALID_HANDLE_VALUE != hFile))
+	{
+		BY_HANDLE_FILE_INFORMATION fi{0};
+
+		if (GetFileInformationByHandle(hFile, &fi))
+		{
+			CloseHandle(hFile);
+			return fi.ftLastWriteTime;
+		}
+
+		CloseHandle(hFile);
+		return null;
+	}
+
+	return null;
+}
+
+//=================================================================================================
+//=================================================================================================
+inline long long FileTimeToUInt64(const FILETIME &filetime)
+{
+	return *reinterpret_cast<const long long *>(&filetime.dwLowDateTime);
+}
 
 
 //=================================================================================================
@@ -189,48 +241,6 @@ __declspec(noinline) inline char *comma(unsigned __int64 n)
 }
 
 //=================================================================================================
-//
-// comma
-//
-// Given an integer, create a comma-delimited string representation of
-// that integer in decimal form. For example, one million, 1000000,
-// creates a string "1,000,000"
-//
-// in:
-//  n				The integer
-//
-// out:
-//  return value	A pointer to a static string
-//
-//=================================================================================================
-__declspec(noinline) inline char *Md5HashToString(const unsigned char hash[16])
-{
-	const int numStrings = 8; // must be a power of two!!
-	const int stringLength = 33;
-	static char string[numStrings][stringLength];
-	static int	index=-1;
-	static const char hex[] = "0123456789ABCDEF";
-
-	// make sure the numstrings is a power of two
-	C_ASSERT(0 == (numStrings & (numStrings - 1)));
-
-	index = (index+1)&(numStrings-1);
-
-	char *p = string[index];
-
-	for (int i=0 ; i<16 ; i++)
-	{
-		*p++ = hex[hash[i] >> 4];
-		*p++ = hex[hash[i] & 0x0F];
-	}
-
-	*p++ = 0;
-
-	return string[index];
-
-}
-
-//=================================================================================================
 //=================================================================================================
 inline bool RelativeToFullpath(char *szPath, size_t lenInCharacters)
 {
@@ -259,4 +269,6 @@ inline bool RelativeToFullpath(char *szPath, size_t lenInCharacters)
 
 	return false;
 }
+
+
 

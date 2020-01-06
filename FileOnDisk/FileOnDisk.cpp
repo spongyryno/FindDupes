@@ -8,58 +8,114 @@
 #include <HardLink.h>
 
 const size_t maxString = 1024;
-static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","md5cache.bin","folder.bin","folder.jpg",pszLocalCacheFileName };
+static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","folder.bin","folder.jpg",pszLocalCacheFileName,pszOldLocalCacheFileName };
+
+#define NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
 
 //=================================================================================================
+// Internal functions
 //=================================================================================================
-static void ProcessFolder(const char *szName, FileOnDiskSet &files, int depth);
-static void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<char *,const MD5CacheItem *> *pumap);
-static bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose);
-static bool GetFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose);
-static bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose);
+static void ProcessFolder(const char *szName, FileOnDiskSet &files, int depth, bool clean);
+static void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean);
+static bool CalcFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose);
+static bool GetFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose);
+static bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose);
 
 #define MAX_STRING 1024
 
 #define MAKELONGLONG(lo,hi) ((long long)(((unsigned long long)(lo)) | (((unsigned long long)(hi)) << 32)))
 
+
+
 //=================================================================================================
 //=================================================================================================
-void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth)
+inline long long GetWin32FindDataFileSize(const WIN32_FIND_DATAA &fd)
 {
-	char				szFileSearchSpec[maxString];
-	char				foldercache[maxString];
-	HANDLE				hFile;
-	MD5Cache			cache;
-	WIN32_FIND_DATAA	fd;
-	std::unordered_map<char *,const MD5CacheItem *> umap;
-	std::unordered_map<char *,const MD5CacheItem *> *pumap = nullptr;
+	return MAKELONGLONG(fd.nFileSizeLow, fd.nFileSizeHigh);
+}
 
+//=================================================================================================
+//=================================================================================================
+inline std::string GetFolderWildcard(const std::string &folder)
+{
+	std::string wildcard{folder};
+	wildcard.append(R"(\*.*)");
+	return wildcard;
+}
+
+//=================================================================================================
+//=================================================================================================
+inline std::string CleanupOldCacheFiles(const std::string folderName)
+{
+	std::string newfoldercache{folderName};
+	std::string	oldfoldercache{newfoldercache};
+
+	newfoldercache.append(R"(\)");
+	newfoldercache.append(pszLocalCacheFileName);
+
+	oldfoldercache.append(R"(\)");
+	oldfoldercache.append(pszOldLocalCacheFileName);
+
+	bool oldExists = fexists(oldfoldercache.c_str());
+	bool newExists = fexists(newfoldercache.c_str());
+
+	if (oldExists && !newExists)
 	{
-		strcpy_s(foldercache, szFolderName);
-		strcat_s(foldercache, "\\");
-		strcat_s(foldercache, pszLocalCacheFileName);
-		cache.Read(foldercache);
-
-		for_each(cache.Items.begin(), cache.Items.end(), [&](MD5CacheItem &item)
-		{
-			umap[cache.GetFileName(item)] = &item;
-		});
-
-		pumap = &umap;
+		// rename the old to the new
+		Logger::Get().printf(Logger::Level::Error, "Need to rename old cache file: \"%s\"\n", oldfoldercache);
+		MoveFileA(oldfoldercache.c_str(), newfoldercache.c_str());
+	}
+	else if (oldExists && newExists)
+	{
+		// delete the old
+		Logger::Get().printf(Logger::Level::Error, "Need to delete old cache file: \"%s\"\n", oldfoldercache);
+		DeleteFileA(oldfoldercache.c_str());
 	}
 
-	strcpy_s(szFileSearchSpec, szFolderName);
-	strcat_s(szFileSearchSpec, "\\*.*");
+	return newfoldercache;
+}
+
+
+
+//=================================================================================================
+//=================================================================================================
+#ifdef NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
+inline std::string GetCacheFileName(const std::string folderName)
+{
+	std::string foldercache{folderName};
+
+	foldercache.append(R"(\)");
+	foldercache.append(pszLocalCacheFileName);
+
+	return foldercache;
+}
+#else // NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
+inline std::string GetCacheFileName(const std::string folderName)
+{
+	return CleanupOldCacheFiles(folderName);
+}
+#endif // NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
+
+
+//=================================================================================================
+//=================================================================================================
+template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *szFolderName, int depth, _ProcessFileFunctor processFileFunc)
+{
+	std::string fileSearchSpec{GetFolderWildcard(szFolderName)};
+
+	HANDLE				hFile;
+	WIN32_FIND_DATAA	fd;
 
 	const size_t directoryStartSize = 32;
 	std::vector<WIN32_FIND_DATAA>	fds;
 	fds.reserve(directoryStartSize);
 
-	hFile = FindFirstFileExA(szFileSearchSpec, FindExInfoBasic, reinterpret_cast<void *>(&fd), FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+	hFile = FindFirstFileExA(fileSearchSpec.c_str(), FindExInfoBasic, reinterpret_cast<void *>(&fd), FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
 	if (hFile != INVALID_HANDLE_VALUE)
 	{
 		do
 		{
+			// skip reparse points
 			if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
 			{
 				continue;
@@ -81,39 +137,141 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth)
 
 		FindClose(hFile);
 	}
+	else
+	{
+		auto err = GetLastError();
+		Logger::Get().printf(Logger::Level::Error, "Error %d accessing path \"%s\"\n", err, fileSearchSpec.c_str());
+	}
 
-	for_each(fds.begin(), fds.end(), [&](WIN32_FIND_DATAA &fd)
+	// folders
+	for (auto &fd : fds)
 	{
 		if (0 == (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		{
-			ProcessFile(szFolderName, &fd, files, depth, pumap);
+			processFileFunc(szFolderName, &fd, depth);
 		}
-	});
+	}
 
-	for_each(fds.begin(), fds.end(), [&](WIN32_FIND_DATAA &fd)
+	// files
+	for (auto &fd : fds)
 	{
 		if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		{
-			ProcessFile(szFolderName, &fd, files, depth, pumap);
+			processFileFunc(szFolderName, &fd, depth);
 		}
-	});
+	}
 
 	return;
 }
 
 //=================================================================================================
 //=================================================================================================
-void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<char *,const MD5CacheItem *> *pumap)
+void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bool clean)
 {
-	char szFullPath[maxString];
+	// rename .bin to .md5
+	auto foldercache = GetCacheFileName(szFolderName);
 
-	strcpy_s(szFullPath, szFolderName);
-	strcat_s(szFullPath, "\\");
-	strcat_s(szFullPath, pfd->cFileName);
+	Md5Cache			cache;
+	Md5Cache			newCache;
+	std::unordered_map<Path,const Md5CacheItem *> umap;
+	std::unordered_map<Path,const Md5CacheItem *> *pumap = nullptr;
+
+	{
+		if (cache.Load(foldercache.c_str()))
+		{
+			for (auto &item : cache.Items)
+			{
+				umap[cache.GetFileName(item)] = &item;
+			}
+
+			pumap = &umap;
+
+			if (clean)
+			{
+				newCache.Items.reserve(cache.Items.size());
+				newCache.Strings.reserve(cache.Strings.size());
+			}
+		}
+	}
+
+	ProcessFilesInFolder(szFolderName, depth, [&pumap,&files,&clean,&cache,&newCache](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
+	{
+		ProcessFile(szFolderName, pfd, files, depth, pumap, clean);
+
+		if (clean && pumap)
+		{
+			//WIN32_FIND_DATAA	&fd = *pfd;
+
+			if (0 == (pfd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+			{
+				if (pumap->find(pfd->cFileName) != pumap->end())
+				{
+					const Md5CacheItem *pitem = (*pumap)[pfd->cFileName];
+
+					if (pitem->Size != GetWin32FindDataFileSize(*pfd))
+					{
+						// remove it
+						__nop();
+					}
+					else if (FileTimeDifference(pitem->Time, pfd->ftLastWriteTime) != 0)
+					{
+						// remove it
+						__nop();
+					}
+					else
+					{
+						// add it to the new cache!!
+						Md5CacheItem newItem = *pitem;
+						newItem.Name = static_cast<long>(newCache.Strings.size());
+						const char *pszName = cache.GetFileName(*pitem);
+						size_t nameSize = strlen(pszName);
+						newCache.Strings.insert(newCache.Strings.end(), pszName, pszName + nameSize + 1);
+						newCache.Items.push_back(newItem);
+					}
+				}
+				else
+				{
+					// it's a file that's not in the Md5Cache
+					__nop();
+				}
+			}
+		}
+	});
+
+
+	if (clean)
+	{
+		if (0 == newCache.Items.size() && (0 != cache.Items.size()))
+		{
+			// we have an MD5CACHE.md5 file, but we don't have ANY files that still work with it, so delete the file altogether!
+			Logger::Get().printf(Logger::Level::Info, "Deleting  cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), foldercache.c_str());
+			if (!DeleteFileA(foldercache.c_str()))
+			{
+				Logger::Get().printf(Logger::Level::Info, "     couldn't delete.\n");
+			}
+		}
+		else if (newCache.Items.size() != cache.Items.size())
+		{
+			// we're removed SOME items, so we need to re-write it
+			Logger::Get().printf(Logger::Level::Info, "Rewriting cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), foldercache.c_str());
+			newCache.Save(foldercache.c_str());
+		}
+	}
+
+	return;
+}
+
+//=================================================================================================
+//=================================================================================================
+void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean)
+{
+	std::string fullPath{szFolderName};
+	fullPath.append("\\");
+	fullPath.append(pfd->cFileName);
 
 	if (pfd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 	{
-		return ProcessFolder(szFullPath, files, depth+1);
+		return ProcessFolder(fullPath.c_str(), files, depth+1, clean);
 	}
 	else
 	{
@@ -123,23 +281,24 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 		// add the file...
 		FileOnDisk file;
 
-		files.AddPathToStrings(file, szFullPath, strlen(szFolderName) + 1);
+		files.AddPathToStrings(file, fullPath.c_str(), strlen(szFolderName) + 1);
 
 		file.Hashed		= false;
-		file.Size		= MAKELONGLONG(pfd->nFileSizeLow, pfd->nFileSizeHigh);
+		file.Size		= GetWin32FindDataFileSize(*pfd);
 		file.Time		= pfd->ftLastWriteTime;
+		file.SubPath	= file.Path + files.RootPathLength + 1;
 
 		if (nullptr != pumap)
 		{
 			if (pumap->find(pfd->cFileName) != pumap->end())
 			{
-				const MD5CacheItem *pitem = (*pumap)[pfd->cFileName];
+				const Md5CacheItem *pitem = (*pumap)[pfd->cFileName];
 				if (pitem->Size == file.Size)
 				{
 					if (pitem->Time == file.Time)
 					{
 						file.Hashed = true;
-						memcpy(file.Hash, pitem->Hash, sizeof(file.Hash));
+						file.Hash = pitem->Hash;
 					}
 				}
 			}
@@ -154,9 +313,10 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 
 //=================================================================================================
 //=================================================================================================
-void FileOnDiskSet::QueryFileSystem(const char *pszRootPath)
+void FileOnDiskSet::QueryFileSystem(const char *pszRootPath, bool clean)
 {
-	ProcessFolder(pszRootPath, *this, 0);
+	this->RootPathLength = strlen(pszRootPath);
+	ProcessFolder(pszRootPath, *this, 0, clean);
 }
 
 //=================================================================================================
@@ -165,7 +325,7 @@ void FileOnDiskSet::QueryFileSystem(const char *pszRootPath)
 void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 {
 	// first, make a map of paths to make sure that we don't add anything that already exists...
-	std::unordered_map<char *, size_t> umap;
+	std::unordered_map<Path, size_t> umap;
 
 	// reserve space for the strings
 	this->Strings.reserve(this->Strings.size() + input.Strings.size());
@@ -176,16 +336,16 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 		umap.reserve(this->Items.size());
 
 		int index = 0;
-		for_each(this->Items.begin(), this->Items.end(), [&](const FileOnDisk &file)
+		for (auto &file : this->Items)
 		{
 			umap[this->GetFilePath(file)] = index;
 			index++;
-		});
+		}
 	}
 
-	for_each(input.Items.begin(), input.Items.end(), [&](const FileOnDisk &file)
+	for (auto &file : input.Items)
 	{
-		char *pszPath = const_cast<char *>(input.GetFilePath(file));
+		const char *pszPath = input.GetFilePath(file);
 		if (umap.find(pszPath) != umap.end())
 		{
 			// error---we're trying to add something to the output list that's already there!
@@ -196,8 +356,7 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 		FileOnDisk newFile = file;
 		this->AddPathToStrings(newFile, pszPath, file.Name - file.Path);
 		this->Items.push_back(newFile);
-	});
-
+	}
 }
 
 
@@ -211,27 +370,27 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 {
 	//=============================================================================================
-	//=============================================================================================
 	// build the hashtable
-	std::unordered_map<char *, size_t> umap;
+	std::unordered_map<Path, size_t> umap;
 
 	if (true)
 	{
 		umap.reserve(hashedFiles.Items.size());
 
 		int index = 0;
-		for_each(hashedFiles.Items.begin(), hashedFiles.Items.end(), [&](const FileOnDisk &file)
+		for (auto &file : hashedFiles.Items)
 		{
-			char *pszPath = const_cast<char *>(hashedFiles.GetFilePath(file));
+			const char *pszPath = hashedFiles.GetFilePath(file);
 			umap[pszPath] = index;
 			index++;
-		});
+		}
 	}
 
+	//=============================================================================================
 	// now, go through the files and find if there's a hash
 	if (true)
 	{
-		for_each(this->Items.begin(), this->Items.end(), [&](FileOnDisk &file)
+		for (auto &file : this->Items)
 		{
 			auto place = umap.find(this->GetFilePath(file));
 			if (place != umap.end())
@@ -248,17 +407,17 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 					if (hashed.Hashed)
 					{
 						file.Hashed = hashed.Hashed;
-						memcpy(file.Hash, hashed.Hash, sizeof(file.Hash));
+						file.Hash = hashed.Hash;
 					}
 				}
 			}
-		});
+		}
 	}
 }
 
 //==================================================================================================
 //==================================================================================================
-bool AreAllOfTheseHardLinksToOneAnother(const std::vector<char *> &filesToCheckForHardLinks)
+bool AreAllOfTheseHardLinksToOneAnother(const std::vector<const char *> &filesToCheckForHardLinks)
 {
 	if (filesToCheckForHardLinks.size() < 2)
 	{
@@ -319,6 +478,9 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 		for (size_t i = 0; i<this->Items.size(); i++)
 		{
 			FileOnDisk &file = this->Items[i];
+			auto path = this->GetFilePath(i);
+			auto name = this->GetFileName(i);
+			auto subp = this->GetSubPathName(i);
 
 			if (file.Hashed)
 			{
@@ -364,7 +526,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 					++iEndIndex;
 				}
 
-				std::vector<char *> filesToCheckForHardLinks;
+				std::vector<const char *> filesToCheckForHardLinks;
 				filesToCheckForHardLinks.reserve(1+iEndIndex-iStartIndex);
 
 				for (size_t i2=iStartIndex; i2<iEndIndex; ++i2)
@@ -391,9 +553,9 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 				// now, save it to the local hash cache
 				if (true)
 				{
-					MD5Cache cache;
+					Md5Cache cache;
 					char szPath[maxString];
-					char *pszPath = this->GetFilePath(file);
+					const char *pszPath = this->GetFilePath(file);
 					strncpy_s(szPath, pszPath, file.Name - file.Path);
 					szPath[file.Name - file.Path] = 0;
 					//strcat_s(szPath, "\\");
@@ -402,19 +564,19 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 					if (cache.Load(szPath))
 					{
 						// we read something, so add ourselves to it
-						std::unordered_map<char *, size_t> umap;
+						std::unordered_map<Path, size_t> umap;
 
 						size_t index = 0;
-						for_each(cache.Items.begin(), cache.Items.end(), [&](MD5CacheItem &item)
+						for (auto &item : cache.Items)
 						{
 							umap[cache.GetFileName(item)] = index;
 							index++;
-						});
+						}
 
 						if (umap.find(this->GetFileName(file)) == umap.end())
 						{
-							MD5CacheItem item = file;
-							char *pszName = this->GetFileName(file);
+							Md5CacheItem item = file;
+							const char *pszName = this->GetFileName(file);
 							item.Name = static_cast<long>(cache.Strings.size());
 							cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
 							cache.Items.push_back(item);
@@ -424,7 +586,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 						{
 							// it already exists... overwrite it
 							index = umap[this->GetFileName(file)];
-							MD5CacheItem item = file;
+							Md5CacheItem item = file;
 							item.Name = cache.Items[index].Name;
 							cache.Items[index] = item;
 							cache.Save(szPath);
@@ -435,9 +597,9 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 						cache.Items.clear();
 						cache.Strings.clear();
 
-						MD5CacheItem item = file;
+						Md5CacheItem item = file;
 						item.Name = static_cast<long>(cache.Strings.size());
-						char *pszName = this->GetFileName(file);
+						const char *pszName = this->GetFileName(file);
 						cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
 						cache.Items.push_back(item);
 						cache.Save(szPath);
@@ -455,7 +617,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 {
 	// create a path map of the infiles
-	std::unordered_map<char *, size_t> umap;
+	std::unordered_map<Path, size_t> umap;
 
 	if (true)
 	{
@@ -463,21 +625,21 @@ void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 		umap.reserve(infiles.Items.size());
 
 		int index = 0;
-		for_each(infiles.Items.begin(), infiles.Items.end(), [&](const FileOnDisk &file)
+		for (auto &file : infiles.Items)
 		{
-			char *pszPath = const_cast<char *>(infiles.GetFilePath(file));
+			const char *pszPath = infiles.GetFilePath(file);
 			umap[pszPath] = index;
 			index++;
-		});
+		}
 	}
 
 	FileOnDiskSet output;
 	output.Items.reserve(this->Items.size());
 	output.Strings.reserve(this->Strings.size());
 
-	for_each(this->Items.begin(), this->Items.end(), [&](const FileOnDisk &file)
+	for (auto &file : this->Items)
 	{
-		char *pszPath = const_cast<char *>(this->GetFilePath(file));
+		const char *pszPath = this->GetFilePath(file);
 
 		if (umap.find(pszPath) == umap.end())
 		{
@@ -490,7 +652,7 @@ void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 			#ifdef _DEBUG
 			#endif
 		}
-	});
+	}
 
 	this->Items.clear();
 	this->Strings.clear();
@@ -499,9 +661,75 @@ void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 	this->Strings = std::move(output.Strings);
 }
 
+//=================================================================================================
+//=================================================================================================
+bool FileOnDiskSet::UpdateFile(const FileOnDisk &file)
+{
+	Md5Cache cache;
+
+	// this will represent the location of the Md5Cache file
+	char szPath[maxString];
+
+	// get the full path
+	auto pszPath = this->GetFilePath(file);
+
+	// copy the folder part
+	strncpy_s(szPath, pszPath, file.Name - file.Path);
+
+	// null-terminate it
+	szPath[file.Name - file.Path] = 0;
+
+	// add the name of the cache file
+	strcat_s(szPath, pszLocalCacheFileName);
+
+	// load the cache
+	if (cache.Load(szPath))
+	{
+		auto filename = this->GetFileName(file);
+		// find the item
+		for (auto &i : cache.Items)
+		{
+			auto cachedName = cache.GetFileName(i);
+			if (0 == _stricmp(cachedName, filename))
+			{
+				i = file;
+				cache.Save(szPath);
+				return true;
+			}
+		}
+
+		// the filename wasn't found within the MD5 cache at all
+		Md5CacheItem item = file;
+		item.Name = static_cast<long>(cache.Strings.size());
+		cache.Strings.insert(cache.Strings.end(), filename, filename + strlen(filename) + 1);
+		cache.Items.push_back(item);
+		cache.Save(szPath);
+		return true;
+
+	}
+	else
+	{
+		// no MD5 cache file exists... let's create one!
+		cache.Items.clear();
+		cache.Strings.clear();
+
+		Md5CacheItem item = file;
+		item.Name = static_cast<long>(cache.Strings.size());
+		const char *pszName = this->GetFileName(file);
+		cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
+		cache.Items.push_back(item);
+		cache.Save(szPath);
+		return true;
+	}
+
+	return false;
+}
+
+
+
 //==================================================================================================
 //==================================================================================================
-bool MD5Cache::Load(const char *pszFileName)
+bool Md5Cache::Load(const char *pszFileName)
 {
 	bool result = false;
 
@@ -524,14 +752,14 @@ bool MD5Cache::Load(const char *pszFileName)
 			this->Strings.clear();
 
 			size_t itemcount = static_cast<size_t>(header.numFiles);
-			size_t stringSize = static_cast<size_t>(filesize.QuadPart) - (itemcount * sizeof(MD5CacheItem)) - sizeof(header);
+			size_t stringSize = static_cast<size_t>(filesize.QuadPart) - (itemcount * sizeof(Md5CacheItem)) - sizeof(header);
 
 			this->Items.reserve(itemcount);
 			this->Strings.reserve(stringSize);
 
 			size_t i = 0;
 
-			MD5CacheItem item;
+			Md5CacheItem item;
 
 			for (i=0 ; i<itemcount ; i++)
 			{
@@ -574,7 +802,7 @@ bool MD5Cache::Load(const char *pszFileName)
 
 //==================================================================================================
 //==================================================================================================
-bool MD5Cache::Save(const char *pszFileName)
+bool Md5Cache::Save(const char *pszFileName)
 {
 	bool result = false;
 
@@ -644,7 +872,7 @@ inline BOOL SafeCryptDestroyHash(HCRYPTHASH &hHash)
 // Read in the contents of a file, calculating the MD5 cache of its contents, and return the
 // results
 //==================================================================================================
-bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
+bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose)
 {
 #if defined(_M_X64)
 	const int bufferSize = 1024*1024;
@@ -709,7 +937,7 @@ bool CalcFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
 	}
 
 	// copy the result to the output buffer
-	memcpy(pHash, hash, sizeof(hash));
+	memcpy(chash._data, hash, sizeof(hash));
 	result = true;
 
 Cleanup:
@@ -727,118 +955,21 @@ Cleanup:
 // Read in the contents of a file, calculating the MD5 cache of its contents, and return the
 // results
 //==================================================================================================
-bool GetFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
+bool GetFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose)
 {
 	// first, see if there are hard links...
 	std::vector<std::string> hardlinks = GetAllHardLinksA(szFileName);
-	for (auto i=hardlinks.begin(); i!=hardlinks.end(); ++i)
+	for (auto &i : hardlinks)
 	{
-		if (GetCachedHash(i->c_str(), pHash, verbose))
+		if (GetCachedHash(i.c_str(), hash, verbose))
 		{
-			verboseprintf("No hash needed for \"%s\" because we got it from \"%s\"...\n", szFileName, i->c_str());
+			verboseprintf("No hash needed for \"%s\" because we got it from \"%s\"...\n", szFileName, i.c_str());
 			return true;
 		}
 	}
 
-	return CalcFileMd5Hash(szFileName, pHash, verbose);
+	return CalcFileMd5Hash(szFileName, hash, verbose);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -848,11 +979,11 @@ bool GetFileMd5Hash(const char *szFileName, unsigned char *pHash, bool verbose)
 //
 // See if a file already has a valid hash
 //==================================================================================================
-bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose)
+bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose)
 {
 	bool result = false;
-	MD5Cache cache;
-	std::unordered_map<char *,const MD5CacheItem *> umap;
+	Md5Cache cache;
+	std::unordered_map<Path,const Md5CacheItem *> umap;
 	char szCacheFileName[maxString];
 
 	strncpy_s(szCacheFileName, szFileName, ARRAYSIZE(szCacheFileName));
@@ -870,17 +1001,17 @@ bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose)
 
 	if (cache.Load(szCacheFileName))
 	{
-		for_each(cache.Items.begin(), cache.Items.end(), [&](MD5CacheItem &item)
+		for (auto &item : cache.Items)
 		{
 			umap[cache.GetFileName(item)] = &item;
-		});
+		}
 
 		// see if we have an entry for this item
-		char *pszFileNameOnly = const_cast<char *>(&szFileName[fileNameOffset]);
+		const char *pszFileNameOnly = &szFileName[fileNameOffset];
 		auto cacheitem = umap.find(pszFileNameOnly);
 		if (cacheitem != umap.end())
 		{
-			const MD5CacheItem *pcacheitem = umap[pszFileNameOnly];
+			const Md5CacheItem *pcacheitem = umap[pszFileNameOnly];
 
 			// now, see if it's valid
 			HANDLE hFile = CreateFileA(szFileName, FILE_READ_ATTRIBUTES| FILE_READ_EA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
@@ -897,7 +1028,7 @@ bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose)
 					if ((filesize.QuadPart == pcacheitem->Size) && (fileInfo.ftLastWriteTime.dwHighDateTime == pcacheitem->Time.dwHighDateTime) && (fileInfo.ftLastWriteTime.dwLowDateTime == pcacheitem->Time.dwLowDateTime))
 					{
 						size_t hashsize = sizeof(pcacheitem->Hash);
-						memcpy(pHash, pcacheitem->Hash, hashsize);
+						hash = pcacheitem->Hash;
 						result = true;
 					}
 					else
@@ -914,31 +1045,23 @@ bool GetCachedHash(const char *szFileName, unsigned char *pHash, bool verbose)
 }
 
 
-
-static void CleanFolder(const char *szName);
-
 //=================================================================================================
 //=================================================================================================
-void CleanFolder(const char *szFolderName)
+static void CleanFolderRecurse(const char *szFolderName)
 {
-	MD5Cache cache;
-	MD5Cache newCache;
-	char szCacheFileName[maxString];
-	std::unordered_map<char *,const MD5CacheItem *> umap;
-	std::unordered_map<char *,const MD5CacheItem *> *pumap = nullptr;
+	Md5Cache cache;
+	Md5Cache newCache;
+	std::unordered_map<Path,const Md5CacheItem *> umap;
+	std::unordered_map<Path,const Md5CacheItem *> *pumap = nullptr;
+	auto foldercache = GetCacheFileName(szFolderName);
 
-	if (true)
 	{
-		strncpy_s(szCacheFileName, szFolderName, ARRAYSIZE(szCacheFileName));
-		strcat_s(szCacheFileName, "\\");
-		strcat_s(szCacheFileName, pszLocalCacheFileName);
-
-		if (cache.Load(szCacheFileName))
+		if (cache.Load(foldercache.c_str()))
 		{
-			for_each(cache.Items.begin(), cache.Items.end(), [&](MD5CacheItem &item)
+			for (auto &item : cache.Items)
 			{
 				umap[cache.GetFileName(item)] = &item;
-			});
+			}
 
 			pumap = &umap;
 
@@ -947,113 +1070,80 @@ void CleanFolder(const char *szFolderName)
 		}
 	}
 
-	char				szFileSearchSpec[maxString];
-	HANDLE				hFile;
-	WIN32_FIND_DATAA	fd;
-
-	strcpy_s(szFileSearchSpec, szFolderName);
-	strcat_s(szFileSearchSpec, "\\*.*");
-
-	hFile = FindFirstFileExA(szFileSearchSpec, FindExInfoBasic, reinterpret_cast<void *>(&fd), FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
-	if (hFile != INVALID_HANDLE_VALUE)
+	ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
 	{
-		do
+		WIN32_FIND_DATAA	&fd = *pfd;
+
+		if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		{
-			if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
-			{
-				continue;
-			}
+			size_t newFolderStringSize = strlen(szFolderName) + strlen(fd.cFileName) + 2;
+			std::vector<char> szNewPathName(newFolderStringSize);
+			char *pszNewPathName = &szNewPathName[0];
+			strcpy_s(pszNewPathName, newFolderStringSize, szFolderName);
+			strcat_s(pszNewPathName, newFolderStringSize, "\\");
+			strcat_s(pszNewPathName, newFolderStringSize, fd.cFileName);
 
-			for (size_t i = 0; i < ARRAYSIZE(szFileNamesToIgnore); i++)
+			CleanFolderRecurse(pszNewPathName);
+		}
+		else
+		{
+			if (umap.find(fd.cFileName) != umap.end())
 			{
-				if (0 == _stricmp(fd.cFileName, szFileNamesToIgnore[i]))
+				const Md5CacheItem *pitem = umap[fd.cFileName];
+
+				if (pitem->Size != GetWin32FindDataFileSize(fd))
 				{
-					goto continueloop;
+					// remove it
+					__nop();
 				}
-			}
-
-			if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-			{
-				size_t newFolderStringSize = strlen(szFolderName) + strlen(fd.cFileName) + 2;
-				std::vector<char> szNewPathName(newFolderStringSize);
-				char *pszNewPathName = &szNewPathName[0];
-				strcpy_s(pszNewPathName, newFolderStringSize, szFolderName);
-				strcat_s(pszNewPathName, newFolderStringSize, "\\");
-				strcat_s(pszNewPathName, newFolderStringSize, fd.cFileName);
-
-				CleanFolder(pszNewPathName);
-			}
-			else
-			{
-				if (umap.find(fd.cFileName) != umap.end())
+				else if (FileTimeDifference(pitem->Time, fd.ftLastWriteTime) != 0)
 				{
-					const MD5CacheItem *pitem = umap[fd.cFileName];
-
-					if (pitem->Size != MAKELONGLONG(fd.nFileSizeLow, fd.nFileSizeHigh))
-					{
-						// remove it
-						__nop();
-					}
-					else if (FileTimeDifference(pitem->Time, fd.ftLastWriteTime) != 0)
-					{
-						// remove it
-						__nop();
-					}
-					else
-					{
-						// add it to the new cache!!
-
-						MD5CacheItem newItem = *pitem;
-						newItem.Name = static_cast<long>(newCache.Strings.size());
-						const char *pszName = cache.GetFileName(*pitem);
-						size_t nameSize = strlen(pszName);
-						newCache.Strings.insert(newCache.Strings.end(), pszName, pszName + nameSize + 1);
-						newCache.Items.push_back(newItem);
-					}
+					// remove it
+					__nop();
 				}
 				else
 				{
-					// it's a file that's not in the MD5cache
-					__nop();
+					// add it to the new cache!!
+
+					Md5CacheItem newItem = *pitem;
+					newItem.Name = static_cast<long>(newCache.Strings.size());
+					const char *pszName = cache.GetFileName(*pitem);
+					size_t nameSize = strlen(pszName);
+					newCache.Strings.insert(newCache.Strings.end(), pszName, pszName + nameSize + 1);
+					newCache.Items.push_back(newItem);
 				}
 			}
-
-
-		continueloop:;
-
-		} while (FindNextFileA(hFile, &fd));
-
-		FindClose(hFile);
-
-		if (0 == newCache.Items.size() && (0 != cache.Items.size()))
-		{
-			// we have an MD5CACHE.bin file, but we don't have ANY files that still work with it, so delete the file altogether!
-			Logger::Get().printf(Logger::Level::Info, "Deleting  cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), szCacheFileName);
-			if (!DeleteFileA(szCacheFileName))
+			else
 			{
-				Logger::Get().printf(Logger::Level::Info, "     couldn't delete.\n");
+				// it's a file that's not in the Md5Cache
+				__nop();
 			}
 		}
-		else if (newCache.Items.size() != cache.Items.size())
+	});
+
+	if (0 == newCache.Items.size() && (0 != cache.Items.size()))
+	{
+		// we have an MD5CACHE.md5 file, but we don't have ANY files that still work with it, so delete the file altogether!
+		Logger::Get().printf(Logger::Level::Info, "Deleting  cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), foldercache.c_str());
+		if (!DeleteFileA(foldercache.c_str()))
 		{
-			// we're removed SOME items, so we need to re-write it
-			Logger::Get().printf(Logger::Level::Info, "Rewriting cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), szCacheFileName);
-			newCache.Save(szCacheFileName);
+			Logger::Get().printf(Logger::Level::Info, "     couldn't delete.\n");
 		}
+	}
+	else if (newCache.Items.size() != cache.Items.size())
+	{
+		// we're removed SOME items, so we need to re-write it
+		Logger::Get().printf(Logger::Level::Info, "Rewriting cache file (from %d to %d items) \"%s\"\n", cache.Items.size(), newCache.Items.size(), foldercache.c_str());
+		newCache.Save(foldercache.c_str());
 	}
 
 	return;
 }
 
 
-
-
-
 //=================================================================================================
 //=================================================================================================
 void CleanCacheFiles(const char *pszRootPath)
 {
-	CleanFolder(pszRootPath);
+	CleanFolderRecurse(pszRootPath);
 }
-
-
