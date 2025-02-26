@@ -1,20 +1,18 @@
-// FileOnDisk.cpp : Defines the entry point for the console application.
-//
-
 #include "stdafx.h"
 
 #include <utilities.h>
 #include <FileOnDisk.h>
 #include <HardLink.h>
+#include <console.h>
 
 const size_t maxString = 1024;
 static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","folder.bin","folder.jpg",pszLocalCacheFileName,pszOldLocalCacheFileName };
 
 #define NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
 
-//=================================================================================================
+//=====================================================================================================================================================================================================
 // Internal functions
-//=================================================================================================
+//=====================================================================================================================================================================================================
 static void ProcessFolder(const char *szName, FileOnDiskSet &files, int depth, bool clean);
 static void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean);
 static bool CalcFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose);
@@ -25,17 +23,75 @@ static bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose);
 
 #define MAKELONGLONG(lo,hi) ((long long)(((unsigned long long)(lo)) | (((unsigned long long)(hi)) << 32)))
 
+template<typename T, int size> int inline __countof(const T(&)[size]) { return size; }
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+Md5Hash Md5Hash::NullHash;
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+void UpdateProgressBar(size_t num, size_t total)
+{
+	CONSOLE_SCREEN_BUFFER_INFO	csbi;
+	wchar_t string[1024];
+
+	HANDLE	hFileO = console::GetCurrentConsoleOutputHandle();
+	GetConsoleScreenBufferInfo(hFileO, &csbi);
+
+	size_t width = csbi.srWindow.Right - csbi.srWindow.Left - 4;
+
+	COORD start = { csbi.srWindow.Left + 2,csbi.srWindow.Top + 2 };
+
+	if (width > __countof(string) - 1)
+	{
+		width = __countof(string) - 1;
+	}
+
+	double pct = ((double)num) / ((double)total);
+
+	SetConsoleCursorPosition(hFileO, start);
+
+	string[0] = L'[';
+
+	size_t i0 = 1;
+	size_t i2 = width - 1;
+	size_t i1 = i0 + (int)((i2-i0) * pct);
+
+	for (size_t i = i0; i < i2; ++i)
+	{
+		if (i < i1)
+		{
+			string[i] = L'=';
+		}
+		else
+		{
+			string[i] = L' ';
+		}
+	}
+
+	string[width-1] = L']';
+	string[width] = 0;
+
+	fputws(string, stdout);
+
+	SetConsoleCursorPosition(hFileO, csbi.dwCursorPosition);
+
+	CloseHandle(hFileO);
+
+	return;
+}
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 inline long long GetWin32FindDataFileSize(const WIN32_FIND_DATAA &fd)
 {
 	return MAKELONGLONG(fd.nFileSizeLow, fd.nFileSizeHigh);
 }
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 inline std::string GetFolderWildcard(const std::string &folder)
 {
 	std::string wildcard{folder};
@@ -43,8 +99,8 @@ inline std::string GetFolderWildcard(const std::string &folder)
 	return wildcard;
 }
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 inline std::string CleanupOldCacheFiles(const std::string folderName)
 {
 	std::string newfoldercache{folderName};
@@ -62,13 +118,13 @@ inline std::string CleanupOldCacheFiles(const std::string folderName)
 	if (oldExists && !newExists)
 	{
 		// rename the old to the new
-		Logger::Get().printf(Logger::Level::Error, "Need to rename old cache file: \"%s\"\n", oldfoldercache);
+		Logger::Get().printf(Logger::Level::Error, "Need to rename old cache file: \"%s\"\n", oldfoldercache.c_str());
 		MoveFileA(oldfoldercache.c_str(), newfoldercache.c_str());
 	}
 	else if (oldExists && newExists)
 	{
 		// delete the old
-		Logger::Get().printf(Logger::Level::Error, "Need to delete old cache file: \"%s\"\n", oldfoldercache);
+		Logger::Get().printf(Logger::Level::Error, "Need to delete old cache file: \"%s\"\n", oldfoldercache.c_str());
 		DeleteFileA(oldfoldercache.c_str());
 	}
 
@@ -77,8 +133,8 @@ inline std::string CleanupOldCacheFiles(const std::string folderName)
 
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 #ifdef NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
 inline std::string GetCacheFileName(const std::string folderName)
 {
@@ -97,8 +153,8 @@ inline std::string GetCacheFileName(const std::string folderName)
 #endif // NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *szFolderName, int depth, _ProcessFileFunctor processFileFunc)
 {
 	std::string fileSearchSpec{GetFolderWildcard(szFolderName)};
@@ -164,8 +220,8 @@ template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *sz
 	return;
 }
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bool clean)
 {
 	// rename .bin to .md5
@@ -218,6 +274,11 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bo
 						// remove it
 						__nop();
 					}
+					else if (pitem->Hash == Md5Hash::NullHash)
+					{
+						// remove it
+						__nop();
+					}
 					else
 					{
 						// add it to the new cache!!
@@ -261,8 +322,8 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bo
 	return;
 }
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean)
 {
 	std::string fullPath{szFolderName};
@@ -311,17 +372,17 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 }
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 void FileOnDiskSet::QueryFileSystem(const char *pszRootPath, bool clean)
 {
 	this->RootPathLength = strlen(pszRootPath);
 	ProcessFolder(pszRootPath, *this, 0, clean);
 }
 
-//=================================================================================================
+//=====================================================================================================================================================================================================
 // Adds the files from the input fileset to the output fileset
-//=================================================================================================
+//=====================================================================================================================================================================================================
 void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 {
 	// first, make a map of paths to make sure that we don't add anything that already exists...
@@ -363,13 +424,13 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 
 
 
-//=================================================================================================
+//=====================================================================================================================================================================================================
 // for each file in the input fileset, if a hashed version is in the hashed fileset, copy that
 // hash over, assuming timestamps match up
-//=================================================================================================
+//=====================================================================================================================================================================================================
 void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 {
-	//=============================================================================================
+	//=================================================================================================================================================================================================
 	// build the hashtable
 	std::unordered_map<Path, size_t> umap;
 
@@ -386,7 +447,7 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 		}
 	}
 
-	//=============================================================================================
+	//=================================================================================================================================================================================================
 	// now, go through the files and find if there's a hash
 	if (true)
 	{
@@ -415,8 +476,8 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 	}
 }
 
-//==================================================================================================
-//==================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 bool AreAllOfTheseHardLinksToOneAnother(const std::vector<const char *> &filesToCheckForHardLinks)
 {
 	if (filesToCheckForHardLinks.size() < 2)
@@ -448,14 +509,16 @@ bool AreAllOfTheseHardLinksToOneAnother(const std::vector<const char *> &filesTo
 	return true;
 }
 
-//==================================================================================================
+//=====================================================================================================================================================================================================
 // UpdateHashedFiles
 //
 // Sort the input list, and go through the list and make sure that all files that have the same
 // size have a hash. If a hash needs to be calculated, calculate it, and add it to the hash cache
-//==================================================================================================
+//=====================================================================================================================================================================================================
 void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 {
+	std::vector<std::size_t> filesThatNeedTheirHashCalculated;
+
 	// sort on size
 	{
 		TimeThis t("Sort 2");
@@ -470,14 +533,15 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 		});
 	}
 
+	// find the ones that need a hash
 	{
 		TimeThis t("To calc hashes");
 		int hashedCount = 0;
 		long long byteCount = 0;
 
-		for (size_t i = 0; i<this->Items.size(); i++)
+		for (size_t i = 0; i < this->Items.size(); i++)
 		{
-			FileOnDisk &file = this->Items[i];
+			FileOnDisk& file = this->Items[i];
 			auto path = this->GetFilePath(i);
 			auto name = this->GetFileName(i);
 			auto subp = this->GetSubPathName(i);
@@ -498,7 +562,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 			bool multipleFilesThatAreTheSameSize = false;
 
 			// is this item's size the same as the last one's size?
-			if ((i>0) && (file.Size == this->Items[i - 1].Size))
+			if ((i > 0) && (file.Size == this->Items[i - 1].Size))
 			{
 				multipleFilesThatAreTheSameSize = true;
 				hashNeeded = true;
@@ -515,7 +579,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 				// go through and see if all the files in our list that are the same size are ACTUALLY hard links to
 				// the same file
 				size_t iStartIndex = i;
-				while ((iStartIndex > 0) && (file.Size == this->Items[iStartIndex-1].Size))
+				while ((iStartIndex > 0) && (file.Size == this->Items[iStartIndex - 1].Size))
 				{
 					--iStartIndex;
 				}
@@ -526,10 +590,10 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 					++iEndIndex;
 				}
 
-				std::vector<const char *> filesToCheckForHardLinks;
-				filesToCheckForHardLinks.reserve(1+iEndIndex-iStartIndex);
+				std::vector<const char*> filesToCheckForHardLinks;
+				filesToCheckForHardLinks.reserve(1 + iEndIndex - iStartIndex);
 
-				for (size_t i2=iStartIndex; i2<iEndIndex; ++i2)
+				for (size_t i2 = iStartIndex; i2 < iEndIndex; ++i2)
 				{
 					filesToCheckForHardLinks.push_back(this->GetFilePath(i2));
 				}
@@ -543,6 +607,10 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 
 			if (hashNeeded)
 			{
+#if 1
+				verboseprintf("Adding calc hash entry for \"%s\"...\n", this->GetFilePath(file));
+				filesThatNeedTheirHashCalculated.push_back(i);
+#else
 				TimeThis t("    Calulating hash");
 				verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
 				file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
@@ -555,7 +623,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 				{
 					Md5Cache cache;
 					char szPath[maxString];
-					const char *pszPath = this->GetFilePath(file);
+					const char* pszPath = this->GetFilePath(file);
 					strncpy_s(szPath, pszPath, file.Name - file.Path);
 					szPath[file.Name - file.Path] = 0;
 					//strcat_s(szPath, "\\");
@@ -567,7 +635,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 						std::unordered_map<Path, size_t> umap;
 
 						size_t index = 0;
-						for (auto &item : cache.Items)
+						for (auto& item : cache.Items)
 						{
 							umap[cache.GetFileName(item)] = index;
 							index++;
@@ -576,7 +644,7 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 						if (umap.find(this->GetFileName(file)) == umap.end())
 						{
 							Md5CacheItem item = file;
-							const char *pszName = this->GetFileName(file);
+							const char* pszName = this->GetFileName(file);
 							item.Name = static_cast<long>(cache.Strings.size());
 							cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
 							cache.Items.push_back(item);
@@ -599,21 +667,170 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 
 						Md5CacheItem item = file;
 						item.Name = static_cast<long>(cache.Strings.size());
-						const char *pszName = this->GetFileName(file);
+						const char* pszName = this->GetFileName(file);
 						cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
 						cache.Items.push_back(item);
 						cache.Save(szPath);
 					}
 				}
+#endif
 			}
 		}
+
+		//=============================================================================================================================================================================================
+		// create a set of buckets for each folder
+		//=============================================================================================================================================================================================
+		struct folderbucket
+		{
+			std::string	folder;
+			std::size_t size=0;
+			std::list<std::size_t> files;
+		};
+
+
+		//=============================================================================================================================================================================================
+		// now, we want to bucketize each item we need to calculcate a hash for based on the folder it's in
+		//=============================================================================================================================================================================================
+		std::unordered_map<std::string, folderbucket> bucket_map;
+
+		for (auto &i : filesThatNeedTheirHashCalculated)
+		{
+			FileOnDisk& file = this->Items[i];
+
+			auto path = this->GetFilePath(i);
+			auto name = this->GetFileName(i);
+			auto subp = this->GetSubPathName(i);
+			auto folder = this->GetFolderName(i);
+
+			auto& bucket_iter = bucket_map.find(folder);
+			if (bucket_iter == bucket_map.end())
+			{
+				folderbucket newbucket;
+				newbucket.folder = folder;
+				newbucket.size = 0;
+				bucket_map[folder] = std::move(newbucket);
+				bucket_iter = bucket_map.find(folder);
+			}
+
+			auto& bucket = bucket_iter->second;
+			bucket.size += static_cast<std::size_t>(file.Size);
+			bucket.files.push_back(i);
+
+			__nop();
+		}
+
+
+		//=============================================================================================================================================================================================
+		// now, sort the list of buckets
+		//=============================================================================================================================================================================================
+		std::vector<folderbucket> folderbucketlist(bucket_map.size());
+
+		for (auto &bucket_item : bucket_map)
+		{
+			auto& bucket = std::move(bucket_item.second);
+			folderbucketlist.push_back(bucket);
+		}
+
+#if 1
+		// sort on size
+		{
+			TimeThis t("Sort 3");
+			std::sort(folderbucketlist.begin(), folderbucketlist.end(), [&](folderbucket const &left, folderbucket const &right)
+			{
+				return left.size > right.size;
+			});
+		}
+#endif
+
+		//=============================================================================================================================================================================================
+		// now, process each bucket
+		//=============================================================================================================================================================================================
+		size_t totalNumFiles = 0;
+		size_t numFilesProcessed = 0;
+		for (auto& bucket : folderbucketlist)
+		{
+			totalNumFiles += bucket.files.size();
+		}
+
+
+		for (auto &bucket : folderbucketlist)
+		{
+			Md5Cache cache;
+			char szPath[maxString];
+			strcpy_s(szPath, bucket.folder.c_str());
+			strcat_s(szPath, "\\");
+			strcat_s(szPath, pszLocalCacheFileName);
+			bool dirty = false;
+
+			std::unordered_map<Path, size_t> umap;
+
+			if (cache.Load(szPath))
+			{
+				size_t index = 0;
+				for (auto& item : cache.Items)
+				{
+					umap[cache.GetFileName(item)] = index;
+					index++;
+				}
+			}
+			else
+			{
+				cache.Items.clear();
+				cache.Strings.clear();
+			}
+
+			// got through each file in the bucket
+			for (auto& index : bucket.files)
+			{
+				TimeThis t("    Calulating hash");
+
+				FileOnDisk& file = this->Items[index];
+				auto path = this->GetFilePath(file);
+				auto name = this->GetFileName(file);
+				auto subp = this->GetSubPathName(file);
+
+				verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
+				file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
+				Logger::Get().printf(Logger::Level::Info, "(%13s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
+				hashedCount++;
+				byteCount += file.Size;
+
+				if (umap.find(name) == umap.end())
+				{
+					Md5CacheItem item = file;
+					const char* pszName = name;
+					item.Name = static_cast<long>(cache.Strings.size());
+					cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
+					cache.Items.push_back(item);
+					dirty = true;
+				}
+				else
+				{
+					// it already exists... overwrite it
+					size_t cache_index = umap[name];
+					Md5CacheItem item = file;
+					item.Name = cache.Items[cache_index].Name;
+					cache.Items[cache_index] = item;
+					dirty = true;
+				}
+
+				UpdateProgressBar(numFilesProcessed, totalNumFiles);
+				++numFilesProcessed;
+			}
+
+			if (dirty)
+			{
+				cache.Save(szPath);
+			}
+		}
+
 
 		Logger::Get().printf(Logger::Level::Debug, "Calculated the hash of %d files for %s bytes.\n", hashedCount, comma(byteCount));
 	}
 }
 
-//==================================================================================================
-//==================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 {
 	// create a path map of the infiles
@@ -661,8 +878,8 @@ void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 	this->Strings = std::move(output.Strings);
 }
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 bool FileOnDiskSet::UpdateFile(const FileOnDisk &file)
 {
 	Md5Cache cache;
@@ -727,8 +944,8 @@ bool FileOnDiskSet::UpdateFile(const FileOnDisk &file)
 
 
 
-//==================================================================================================
-//==================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 bool Md5Cache::Load(const char *pszFileName)
 {
 	bool result = false;
@@ -800,8 +1017,8 @@ bool Md5Cache::Load(const char *pszFileName)
 }
 
 
-//==================================================================================================
-//==================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 bool Md5Cache::Save(const char *pszFileName)
 {
 	bool result = false;
@@ -832,8 +1049,8 @@ bool Md5Cache::Save(const char *pszFileName)
 
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 inline BOOL SafeCryptReleaseContext(HCRYPTPROV &hProv, DWORD dwFlags)
 {
 	if (0 != hProv)
@@ -849,8 +1066,8 @@ inline BOOL SafeCryptReleaseContext(HCRYPTPROV &hProv, DWORD dwFlags)
 }
 
 
-//=================================================================================================
-//=================================================================================================
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
 inline BOOL SafeCryptDestroyHash(HCRYPTHASH &hHash)
 {
 	if (0 != hHash)
@@ -866,12 +1083,12 @@ inline BOOL SafeCryptDestroyHash(HCRYPTHASH &hHash)
 }
 
 
-//==================================================================================================
+//=====================================================================================================================================================================================================
 // CalcFileMd5Hash
 //
 // Read in the contents of a file, calculating the MD5 cache of its contents, and return the
 // results
-//==================================================================================================
+//=====================================================================================================================================================================================================
 bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose)
 {
 #if defined(_M_X64)
@@ -949,12 +1166,12 @@ Cleanup:
 }
 
 
-//==================================================================================================
+//=====================================================================================================================================================================================================
 // GetFileMd5Hash
 //
 // Read in the contents of a file, calculating the MD5 cache of its contents, and return the
 // results
-//==================================================================================================
+//=====================================================================================================================================================================================================
 bool GetFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose)
 {
 	// first, see if there are hard links...
@@ -974,11 +1191,11 @@ bool GetFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose)
 
 
 
-//==================================================================================================
+//=====================================================================================================================================================================================================
 // GetCachedHash
 //
 // See if a file already has a valid hash
-//==================================================================================================
+//=====================================================================================================================================================================================================
 bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose)
 {
 	bool result = false;
@@ -1045,9 +1262,9 @@ bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose)
 }
 
 
-//=================================================================================================
-//=================================================================================================
-static void CleanFolderRecurse(const char *szFolderName)
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 {
 	Md5Cache cache;
 	Md5Cache newCache;
@@ -1070,20 +1287,28 @@ static void CleanFolderRecurse(const char *szFolderName)
 		}
 	}
 
-	ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
+	ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache, &cleanEmptyFolders](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
 	{
 		WIN32_FIND_DATAA	&fd = *pfd;
 
 		if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		{
-			size_t newFolderStringSize = strlen(szFolderName) + strlen(fd.cFileName) + 2;
-			std::vector<char> szNewPathName(newFolderStringSize);
-			char *pszNewPathName = &szNewPathName[0];
-			strcpy_s(pszNewPathName, newFolderStringSize, szFolderName);
-			strcat_s(pszNewPathName, newFolderStringSize, "\\");
-			strcat_s(pszNewPathName, newFolderStringSize, fd.cFileName);
+			std::string	newPathName{szFolderName};
 
-			CleanFolderRecurse(pszNewPathName);
+			newPathName.append(R"(\)");
+			newPathName.append(fd.cFileName);
+
+			CleanFolderRecurse(newPathName.c_str(), cleanEmptyFolders);
+
+			if (cleanEmptyFolders)
+			{
+				// ignore return value
+				auto result = RemoveDirectoryA(newPathName.c_str());
+				if (result)
+				{
+					Logger::Get().printf(Logger::Level::Info, "Deleting empty folder \"%s\"\n", newPathName.c_str());
+				}
+			}
 		}
 		else
 		{
@@ -1091,31 +1316,48 @@ static void CleanFolderRecurse(const char *szFolderName)
 			{
 				const Md5CacheItem *pitem = umap[fd.cFileName];
 
-				if (pitem->Size != GetWin32FindDataFileSize(fd))
+				auto fileSize = GetWin32FindDataFileSize(fd);
+
+				if (pitem->Size != fileSize)
 				{
 					// remove it
+					Logger::Get().printf(Logger::Level::Debug, "Cache entry found but removed due to size for file \"%s\" (Cache size: %ld, File size: %ld)\n", fd.cFileName, pitem->Size, fileSize);
 					__nop();
 				}
-				else if (FileTimeDifference(pitem->Time, fd.ftLastWriteTime) != 0)
+				else if (pitem->Hash == Md5Hash::NullHash)
 				{
 					// remove it
 					__nop();
 				}
 				else
 				{
-					// add it to the new cache!!
+					auto fileTimeDifference = FileTimeDifference(pitem->Time, fd.ftLastWriteTime);
 
-					Md5CacheItem newItem = *pitem;
-					newItem.Name = static_cast<long>(newCache.Strings.size());
-					const char *pszName = cache.GetFileName(*pitem);
-					size_t nameSize = strlen(pszName);
-					newCache.Strings.insert(newCache.Strings.end(), pszName, pszName + nameSize + 1);
-					newCache.Items.push_back(newItem);
+					if (fileTimeDifference != 0)
+					{
+						// remove it
+						Logger::Get().printf(Logger::Level::Debug, "Cache entry found but removed due to time difference for file \"%s\" (Time diff: %ld)\n", fd.cFileName, fileTimeDifference);
+						__nop();
+					}
+					else
+					{
+						Logger::Get().printf(Logger::Level::Debug, "Cache entry found and used for file \"%s\"\n", fd.cFileName);
+
+						// add it to the new cache!!
+
+						Md5CacheItem newItem = *pitem;
+						newItem.Name = static_cast<long>(newCache.Strings.size());
+						const char *pszName = cache.GetFileName(*pitem);
+						size_t nameSize = strlen(pszName);
+						newCache.Strings.insert(newCache.Strings.end(), pszName, pszName + nameSize + 1);
+						newCache.Items.push_back(newItem);
+					}
 				}
 			}
 			else
 			{
 				// it's a file that's not in the Md5Cache
+				Logger::Get().printf(Logger::Level::Debug, "No cache entry found for file \"%s\"\n", fd.cFileName);
 				__nop();
 			}
 		}
@@ -1141,9 +1383,9 @@ static void CleanFolderRecurse(const char *szFolderName)
 }
 
 
-//=================================================================================================
-//=================================================================================================
-void CleanCacheFiles(const char *pszRootPath)
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+void CleanCacheFiles(const char *pszRootPath, bool cleanEmptyFolders)
 {
-	CleanFolderRecurse(pszRootPath);
+	CleanFolderRecurse(pszRootPath, cleanEmptyFolders);
 }

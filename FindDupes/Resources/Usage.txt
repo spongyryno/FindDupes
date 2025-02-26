@@ -21,8 +21,10 @@ that folder. This is particularly useful if you want to delete a folder's
 duplicates.
 
 Options:
+    /w folder        Alternate working folder (other than ".").
     /n               Omit logo.
     /c               Clean md5cache.md5 files.
+    /C               Clean md5cache.md5 files and delete empty folders.
     /a               Generate md5cache entries for every file.
     /v               Verbose console output.
     /i folder        Specify an "in" folder.
