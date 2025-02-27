@@ -23,7 +23,7 @@ static bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose);
 
 #define MAKELONGLONG(lo,hi) ((long long)(((unsigned long long)(lo)) | (((unsigned long long)(hi)) << 32)))
 
-template<typename T, int size> int inline __countof(const T(&)[size]) { return size; }
+template<typename T, size_t size> size_t inline __countof(const T(&)[size]) { return size; }
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================

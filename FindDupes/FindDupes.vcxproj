@@ -138,17 +138,6 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <PostBuildEvent>
-      <Command>echo ====================================================================================================
-echo $(TargetPath) =^&gt;
-echo     r:\mike\depot\bin\$(TargetFileName)
-echo     c:\Users\Public\Documents\bin\$(TargetFileName)
-echo ====================================================================================================
-
-if exist "r:\mike\depot\bin2\$(TargetFileName)" attrib -r "r:\mike\depot\bin\$(TargetFileName)"
-xcopy.exe /y /d "$(TargetPath)" "r:\mike\depot\bin"
-
-if exist "c:\Users\Public\Documents\bin\$(TargetFileName)" attrib -r "c:\Users\Public\Documents\bin\$(TargetFileName)"
-xcopy.exe /y /d "$(TargetPath)" "c:\Users\Public\Documents\bin"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">

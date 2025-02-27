@@ -93,7 +93,7 @@ public:
 		memcpy(_data, other._data, sizeof(_data));
 	}
 
-	Md5Hash(Md5Hash &&other)
+	Md5Hash(Md5Hash &&other) noexcept
 	{
 		memcpy(_data, other._data, sizeof(_data));
 	}
