@@ -4,9 +4,18 @@
 #include <FileOnDisk.h>
 #include <HardLink.h>
 #include <console.h>
+#include <ProgressBar.h>
 
-const size_t maxString = 1024;
-static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","folder.bin","folder.jpg",pszLocalCacheFileName,pszOldLocalCacheFileName };
+const size_t maxString = 1024 * 8;
+
+#define FOLDER_NAMES_TO_IGNORE ".","..","System Volume Information"
+#define FILE_NAMES_TO_IGNORE "desktop.ini","folder.bin","folder.jpg","#recycle","thumbs.db",pszLocalCacheFileName,pszOldLocalCacheFileName
+
+static const char *szFolderNamesToIgnore[] = { FOLDER_NAMES_TO_IGNORE };
+
+static const char *szFileNamesToAlwaysIgnore[] = { FILE_NAMES_TO_IGNORE };
+static const char *szFileNamesToIgnore[] = { FILE_NAMES_TO_IGNORE };
+static const char *szFileNamesToSafelyDelete[] = { FILE_NAMES_TO_IGNORE,"AlbumArt.jpg" };
 
 #define NO_LONGER_NEED_TO_RENAME_OLD_CACHE_FILES
 
@@ -15,7 +24,6 @@ static const char *szFileNamesToIgnore[] = { ".","..","desktop.ini","folder.bin"
 //=====================================================================================================================================================================================================
 static void ProcessFolder(const char *szName, FileOnDiskSet &files, int depth, bool clean);
 static void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean);
-static bool CalcFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose);
 static bool GetFileMd5Hash(const char *szFileName, Md5Hash &hash, bool verbose);
 static bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose);
 
@@ -23,64 +31,11 @@ static bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose);
 
 #define MAKELONGLONG(lo,hi) ((long long)(((unsigned long long)(lo)) | (((unsigned long long)(hi)) << 32)))
 
-template<typename T, size_t size> size_t inline __countof(const T(&)[size]) { return size; }
-
 //=====================================================================================================================================================================================================
+// static members declaration/initialization
 //=====================================================================================================================================================================================================
 Md5Hash Md5Hash::NullHash;
-
-//=====================================================================================================================================================================================================
-//=====================================================================================================================================================================================================
-void UpdateProgressBar(size_t num, size_t total)
-{
-	CONSOLE_SCREEN_BUFFER_INFO	csbi;
-	wchar_t string[1024];
-
-	HANDLE	hFileO = console::GetCurrentConsoleOutputHandle();
-	GetConsoleScreenBufferInfo(hFileO, &csbi);
-
-	size_t width = csbi.srWindow.Right - csbi.srWindow.Left - 4;
-
-	COORD start = { csbi.srWindow.Left + 2,csbi.srWindow.Top + 2 };
-
-	if (width > __countof(string) - 1)
-	{
-		width = __countof(string) - 1;
-	}
-
-	double pct = ((double)num) / ((double)total);
-
-	SetConsoleCursorPosition(hFileO, start);
-
-	string[0] = L'[';
-
-	size_t i0 = 1;
-	size_t i2 = width - 1;
-	size_t i1 = i0 + (int)((i2-i0) * pct);
-
-	for (size_t i = i0; i < i2; ++i)
-	{
-		if (i < i1)
-		{
-			string[i] = L'=';
-		}
-		else
-		{
-			string[i] = L' ';
-		}
-	}
-
-	string[width-1] = L']';
-	string[width] = 0;
-
-	fputws(string, stdout);
-
-	SetConsoleCursorPosition(hFileO, csbi.dwCursorPosition);
-
-	CloseHandle(hFileO);
-
-	return;
-}
+int FileOnDiskSet::_numCores = -1;
 
 
 //=====================================================================================================================================================================================================
@@ -91,6 +46,7 @@ inline long long GetWin32FindDataFileSize(const WIN32_FIND_DATAA &fd)
 }
 
 //=====================================================================================================================================================================================================
+// append "\*.*" to a folder
 //=====================================================================================================================================================================================================
 inline std::string GetFolderWildcard(const std::string &folder)
 {
@@ -155,7 +111,7 @@ inline std::string GetCacheFileName(const std::string folderName)
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
-template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *szFolderName, int depth, _ProcessFileFunctor processFileFunc)
+template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *szFolderName, int depth, _ProcessFileFunctor processFileFunc, bool ignoreKnownTypes=true)
 {
 	std::string fileSearchSpec{GetFolderWildcard(szFolderName)};
 
@@ -166,7 +122,7 @@ template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *sz
 	std::vector<WIN32_FIND_DATAA>	fds;
 	fds.reserve(directoryStartSize);
 
-	hFile = FindFirstFileExA(fileSearchSpec.c_str(), FindExInfoBasic, reinterpret_cast<void *>(&fd), FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+	hFile = FindFirstFileExU(fileSearchSpec.c_str(), FindExInfoBasic, reinterpret_cast<void *>(&fd), FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
 	if (hFile != INVALID_HANDLE_VALUE)
 	{
 		do
@@ -177,19 +133,59 @@ template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *sz
 				continue;
 			}
 
-			for (size_t i = 0; i < ARRAYSIZE(szFileNamesToIgnore); i++)
+			if (ignoreKnownTypes)
 			{
-				if (0 == _stricmp(fd.cFileName, szFileNamesToIgnore[i]))
+				if (0 == (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 				{
-					goto continueloop;
+					for (auto& pszFileNameToIgnore : szFileNamesToIgnore)
+					{
+						if (0 == _stricmp(fd.cFileName, pszFileNameToIgnore))
+						{
+							goto continueloop;
+						}
+					}
+				}
+				else
+				{
+					for (auto& pszFolderNameToIgnore : szFolderNamesToIgnore)
+					{
+						if (0 == _stricmp(fd.cFileName, pszFolderNameToIgnore))
+						{
+							goto continueloop;
+						}
+					}
 				}
 			}
+			else
+			{
+				if (0 == (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+				{
+					for (auto& pszFileNameToIgnore : szFileNamesToAlwaysIgnore)
+					{
+						if (0 == _stricmp(fd.cFileName, pszFileNameToIgnore))
+						{
+							goto continueloop;
+						}
+					}
+				}
+				else
+				{
+					for (auto& pszFolderNameToIgnore : szFolderNamesToIgnore)
+					{
+						if (0 == _stricmp(fd.cFileName, pszFolderNameToIgnore))
+						{
+							goto continueloop;
+						}
+					}
+				}
+			}
+
 
 			fds.push_back(fd);
 
 		continueloop:;
 
-		} while (FindNextFileA(hFile, &fd));
+		} while (FindNextFileU(hFile, &fd));
 
 		FindClose(hFile);
 	}
@@ -197,6 +193,7 @@ template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *sz
 	{
 		auto err = GetLastError();
 		Logger::Get().printf(Logger::Level::Error, "Error %d accessing path \"%s\"\n", err, fileSearchSpec.c_str());
+		__nop();
 	}
 
 	// folders
@@ -224,6 +221,11 @@ template <typename _ProcessFileFunctor> void ProcessFilesInFolder(const char *sz
 //=====================================================================================================================================================================================================
 void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bool clean)
 {
+	if (ControlCHandler::TestShouldTerminate())
+	{
+		return;
+	}
+
 	// rename .bin to .md5
 	auto foldercache = GetCacheFileName(szFolderName);
 
@@ -252,12 +254,15 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bo
 
 	ProcessFilesInFolder(szFolderName, depth, [&pumap,&files,&clean,&cache,&newCache](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
 	{
+		if (ControlCHandler::TestShouldTerminate())
+		{
+			return;
+		}
+
 		ProcessFile(szFolderName, pfd, files, depth, pumap, clean);
 
 		if (clean && pumap)
 		{
-			//WIN32_FIND_DATAA	&fd = *pfd;
-
 			if (0 == (pfd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 			{
 				if (pumap->find(pfd->cFileName) != pumap->end())
@@ -299,6 +304,14 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bo
 		}
 	});
 
+	//
+	// debugging... see what has a hash and what doesn't
+	//
+	if (true)
+	{
+
+	}
+
 
 	if (clean)
 	{
@@ -326,12 +339,22 @@ void ProcessFolder(const char *szFolderName, FileOnDiskSet &files, int depth, bo
 //=====================================================================================================================================================================================================
 void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet &files, int depth, std::unordered_map<Path,const Md5CacheItem *> *pumap, bool clean)
 {
+	if (ControlCHandler::TestShouldTerminate())
+	{
+		return;
+	}
+
 	std::string fullPath{szFolderName};
 	fullPath.append("\\");
 	fullPath.append(pfd->cFileName);
 
 	if (pfd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 	{
+		if (ControlCHandler::TestShouldTerminate())
+		{
+			return;
+		}
+
 		return ProcessFolder(fullPath.c_str(), files, depth+1, clean);
 	}
 	else
@@ -353,6 +376,8 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 		{
 			if (pumap->find(pfd->cFileName) != pumap->end())
 			{
+				//printf("\"%s\": Found in MD5 cache\n", files.GetFilePath(file));
+
 				const Md5CacheItem *pitem = (*pumap)[pfd->cFileName];
 				if (pitem->Size == file.Size)
 				{
@@ -362,6 +387,10 @@ void ProcessFile(const char *szFolderName, WIN32_FIND_DATAA *pfd, FileOnDiskSet 
 						file.Hash = pitem->Hash;
 					}
 				}
+			}
+			else
+			{
+				//printf("\"%s\": Not found in MD5 cache\n", files.GetFilePath(file));
 			}
 		}
 
@@ -385,6 +414,8 @@ void FileOnDiskSet::QueryFileSystem(const char *pszRootPath, bool clean)
 //=====================================================================================================================================================================================================
 void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 {
+	TimeThis t("Merging FileOnDiskSets");
+
 	// first, make a map of paths to make sure that we don't add anything that already exists...
 	std::unordered_map<Path, size_t> umap;
 
@@ -393,7 +424,6 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 
 	if (true)
 	{
-		TimeThis t("Build the hashtable");
 		umap.reserve(this->Items.size());
 
 		int index = 0;
@@ -406,6 +436,11 @@ void FileOnDiskSet::MergeFrom(const FileOnDiskSet &input)
 
 	for (auto &file : input.Items)
 	{
+		if (ControlCHandler::TestShouldTerminate())
+		{
+			return;
+		}
+
 		const char *pszPath = input.GetFilePath(file);
 		if (umap.find(pszPath) != umap.end())
 		{
@@ -453,6 +488,11 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 	{
 		for (auto &file : this->Items)
 		{
+			if (ControlCHandler::TestShouldTerminate())
+			{
+				return;
+			}
+
 			auto place = umap.find(this->GetFilePath(file));
 			if (place != umap.end())
 			{
@@ -480,18 +520,32 @@ void FileOnDiskSet::ApplyHashFrom(const FileOnDiskSet &hashedFiles)
 //=====================================================================================================================================================================================================
 bool AreAllOfTheseHardLinksToOneAnother(const std::vector<const char *> &filesToCheckForHardLinks)
 {
+	if (ControlCHandler::TestShouldTerminate())
+	{
+		return false;
+	}
+
 	if (filesToCheckForHardLinks.size() < 2)
 	{
 		return true;
 	}
 
-	AutoCloseHandle	hfile1 = CreateFileA(filesToCheckForHardLinks[0], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	AutoCloseHandle	hfile1 = CreateFileU(filesToCheckForHardLinks[0], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (hfile1.Get() == INVALID_HANDLE_VALUE)
+	{
+		return false;
+	}
+
 	BY_HANDLE_FILE_INFORMATION info1 = {0};
 	GetFileInformationByHandle(hfile1, &info1);
 
 	for (size_t i=1; i<filesToCheckForHardLinks.size(); ++i)
 	{
-		AutoCloseHandle	hfile2 = CreateFileA(filesToCheckForHardLinks[i], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+		AutoCloseHandle	hfile2 = CreateFileU(filesToCheckForHardLinks[i], 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+		if (hfile2.Get() == INVALID_HANDLE_VALUE)
+		{
+			return false;
+		}
 
 		BY_HANDLE_FILE_INFORMATION info2 = {0};
 		GetFileInformationByHandle(hfile2, &info2);
@@ -510,18 +564,198 @@ bool AreAllOfTheseHardLinksToOneAnother(const std::vector<const char *> &filesTo
 }
 
 //=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+void FileOnDiskSet::CalcAllNeededHashesFromOneBucket(FolderBucket& bucket, HashBucketInfo& hbi, TimeThis& t, std::chrono::system_clock::time_point& hashCalcStart, bool verbose, int& hashedCount, long long& byteCount, int iNum)
+{
+	Md5Cache cache;
+	char szPath[maxString];
+	strcpy_s(szPath, bucket.folder.c_str());
+	strcat_s(szPath, "\\");
+	strcat_s(szPath, pszLocalCacheFileName);
+	bool dirty = false;
+
+	std::wstring eta;
+	std::unordered_map<Path, size_t> umap;
+
+	if (true)
+	{
+		std::lock_guard<std::mutex> lock(hbi.mutex);
+		if (hbi.totalBytesProcessed > 0)
+		{
+			double seconds = t.Elapsed();
+			double pct = (double)hbi.totalBytesProcessed / (double)hbi.totalBytesToProcess;
+			size_t secondsNeeded = static_cast<size_t>(seconds / pct);
+			std::chrono::time_point hashCalcEnd = hashCalcStart + std::chrono::seconds(secondsNeeded);
+
+			auto hashCalcEnd_t = std::chrono::system_clock::to_time_t(hashCalcEnd);
+			std::tm hashCalcEnd_local;
+			localtime_s(&hashCalcEnd_local, &hashCalcEnd_t);
+
+			constexpr size_t maxBufferSize = 100;
+			wchar_t etaBuffer[maxBufferSize];
+
+			wcsftime(etaBuffer, maxBufferSize, L"%Om/%Oe/%Y %I:%M:%S", &hashCalcEnd_local);
+
+			eta = etaBuffer;
+
+			std::wstring ampm = hashCalcEnd_local.tm_hour > 11 ? L" PM" : L" AM";
+			eta += ampm;
+		}
+	}
+
+	if (true)
+	{
+		std::lock_guard<std::mutex> lock(hbi.mutex);
+		++hbi.numBucketsProcessed;
+		Logger::Get().printf(Logger::Level::Info, "Bucket %s of %s (ETA: %S)\n", comma(hbi.numBucketsProcessed), comma(hbi.totalBuckets), eta.c_str());
+	}
+
+	if (cache.Load(szPath))
+	{
+		size_t index = 0;
+		for (auto& item : cache.Items)
+		{
+			umap[cache.GetFileName(item)] = index;
+			index++;
+		}
+	}
+	else
+	{
+		cache.Items.clear();
+		cache.Strings.clear();
+	}
+
+	//
+	// got through each file in the bucket
+	//
+	auto bucket_start_time = std::chrono::system_clock::now();
+
+	for (auto& index : bucket.files)
+	{
+		if (ControlCHandler::TestShouldTerminate())
+		{
+			return;
+		}
+
+		TimeThis t2("Calculating one file's MD5 hash");
+
+		FileOnDisk& file = this->Items[index];
+		auto path = this->GetFilePath(file);
+		auto name = this->GetFileName(file);
+		auto subp = this->GetSubPathName(file);
+
+		verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
+		Logger::Get().printf(Logger::Level::Info, "(%13s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
+
+		//
+		// see if the hash already exists
+		//
+		if (umap.find(name) != umap.end())
+		{
+			size_t cache_index = umap[name];
+			Md5CacheItem item = file;
+			item.Name = cache.Items[cache_index].Name;
+			cache.Items[cache_index] = item;
+
+		}
+
+
+
+
+		//
+		// time how long it takes to get the hash
+		//
+		file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
+
+		if (!file.Hashed)
+		{
+			continue;
+		}
+
+		hashedCount++;
+		byteCount += file.Size;
+
+		if (umap.find(name) == umap.end())
+		{
+			Md5CacheItem item = file;
+			const char* pszName = name;
+			item.Name = static_cast<long>(cache.Strings.size());
+			cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
+			cache.Items.push_back(item);
+			dirty = true;
+		}
+		else
+		{
+			// it already exists... overwrite it
+			size_t cache_index = umap[name];
+			Md5CacheItem item = file;
+			item.Name = cache.Items[cache_index].Name;
+			cache.Items[cache_index] = item;
+			dirty = true;
+		}
+
+		//
+		// if it has taken longer than 3 seconds, start the clock over
+		//
+		auto bucket_current_time = std::chrono::system_clock::now();
+		auto elapsed_time = bucket_current_time - bucket_start_time;
+		auto elapsed_time_cutoff = std::chrono::seconds(3);
+
+		if ((elapsed_time > elapsed_time_cutoff) && dirty)
+		{
+			if (dirty)
+			{
+				//
+				// (33,930,525,343) Calculating MD5 hash for "\\parker\all$\ToCheck\Puma\Raid\Video\The_Force_Awakens_-_BLU-RAY\The_Force_Awakens_-_BLU-RAY_t01.mkv"
+				//
+				verboseprintf("Writing out md5 cache because the elapsed time exceeded the cutoff.\n");
+				bucket_start_time = bucket_current_time;
+				cache.Save(szPath);
+				dirty = false;
+			}
+		}
+
+		//pg.Update(numFilesProcessed, totalNumFiles);
+		if (true)
+		{
+			std::lock_guard<std::mutex> lock(hbi.mutex);
+			hbi.totalBytesProcessed += file.Size;
+			++hbi.numFilesProcessed;
+		}
+	}
+
+	if (dirty)
+	{
+		cache.Save(szPath);
+	}
+}
+
+
+//=====================================================================================================================================================================================================
 // UpdateHashedFiles
 //
 // Sort the input list, and go through the list and make sure that all files that have the same
 // size have a hash. If a hash needs to be calculated, calculate it, and add it to the hash cache
 //=====================================================================================================================================================================================================
-void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
+void FileOnDiskSet::UpdateHashedFiles(FindDupesFlags flags)
 {
 	std::vector<std::size_t> filesThatNeedTheirHashCalculated;
 
+	bool forceAll = TestFindDupesFlags(flags, FindDupesFlags::ForceAll);
+	bool verbose = TestFindDupesFlags(flags, FindDupesFlags::Verbose);
+	bool sortOnSize = TestFindDupesFlags(flags, FindDupesFlags::SortOnSize);
+	bool sortReverse = TestFindDupesFlags(flags, FindDupesFlags::SortInReverse);
+	uint32_t iMaxNumThreads = GetMaxNumThreads(flags);
+
+	if (iMaxNumThreads < 1)
+	{
+		iMaxNumThreads = 1;
+	}
+
+
 	// sort on size
 	{
-		TimeThis t("Sort 2");
+		TimeThis t("Sort on file path");
 		std::sort(this->Items.begin(), this->Items.end(), [&](FileOnDisk const &left, FileOnDisk const &right)
 		{
 			if (left.Size == right.Size)
@@ -533,9 +767,14 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 		});
 	}
 
+	if (ControlCHandler::TestShouldTerminate())
+	{
+		return;
+	}
+
 	// find the ones that need a hash
 	{
-		TimeThis t("To calc hashes");
+		TimeThis t("To determine what files need MD5 hashes, and then calculate them.");
 		int hashedCount = 0;
 		long long byteCount = 0;
 
@@ -545,6 +784,11 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 			auto path = this->GetFilePath(i);
 			auto name = this->GetFileName(i);
 			auto subp = this->GetSubPathName(i);
+
+			if (ControlCHandler::TestShouldTerminate())
+			{
+				return;
+			}
 
 			if (file.Hashed)
 			{
@@ -607,91 +851,59 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 
 			if (hashNeeded)
 			{
-#if 1
-				verboseprintf("Adding calc hash entry for \"%s\"...\n", this->GetFilePath(file));
+				//verboseprintf("Adding calc hash entry for \"%s\"...\n", this->GetFilePath(file));
 				filesThatNeedTheirHashCalculated.push_back(i);
-#else
-				TimeThis t("    Calulating hash");
-				verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
-				file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
-				Logger::Get().printf(Logger::Level::Info, "(%13s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
-				hashedCount++;
-				byteCount += file.Size;
-
-				// now, save it to the local hash cache
-				if (true)
-				{
-					Md5Cache cache;
-					char szPath[maxString];
-					const char* pszPath = this->GetFilePath(file);
-					strncpy_s(szPath, pszPath, file.Name - file.Path);
-					szPath[file.Name - file.Path] = 0;
-					//strcat_s(szPath, "\\");
-					strcat_s(szPath, pszLocalCacheFileName);
-
-					if (cache.Load(szPath))
-					{
-						// we read something, so add ourselves to it
-						std::unordered_map<Path, size_t> umap;
-
-						size_t index = 0;
-						for (auto& item : cache.Items)
-						{
-							umap[cache.GetFileName(item)] = index;
-							index++;
-						}
-
-						if (umap.find(this->GetFileName(file)) == umap.end())
-						{
-							Md5CacheItem item = file;
-							const char* pszName = this->GetFileName(file);
-							item.Name = static_cast<long>(cache.Strings.size());
-							cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
-							cache.Items.push_back(item);
-							cache.Save(szPath);
-						}
-						else
-						{
-							// it already exists... overwrite it
-							index = umap[this->GetFileName(file)];
-							Md5CacheItem item = file;
-							item.Name = cache.Items[index].Name;
-							cache.Items[index] = item;
-							cache.Save(szPath);
-						}
-					}
-					else
-					{
-						cache.Items.clear();
-						cache.Strings.clear();
-
-						Md5CacheItem item = file;
-						item.Name = static_cast<long>(cache.Strings.size());
-						const char* pszName = this->GetFileName(file);
-						cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
-						cache.Items.push_back(item);
-						cache.Save(szPath);
-					}
-				}
-#endif
 			}
 		}
 
 		//=============================================================================================================================================================================================
-		// create a set of buckets for each folder
+		// Remove files that need a hash that already have one
 		//=============================================================================================================================================================================================
-		struct folderbucket
+		bool removeAlreadyHashed = false;
+		if (removeAlreadyHashed)
 		{
-			std::string	folder;
-			std::size_t size=0;
-			std::list<std::size_t> files;
-		};
+			TimeThis t("Remove Already Hashed from list to calculate");
+			std::vector<std::size_t> newFilesThatNeedTheirHashCalculated;
+			newFilesThatNeedTheirHashCalculated.reserve(filesThatNeedTheirHashCalculated.size());
+			bool filesWereRemoved = true;
 
+			while (filesWereRemoved)
+			{
+				if (ControlCHandler::TestShouldTerminate())
+				{
+					return;
+				}
+
+				filesWereRemoved = false;
+
+				for (auto &i : filesThatNeedTheirHashCalculated)
+				{
+					FileOnDisk& file = this->Items[i];
+
+					auto path = this->GetFilePath(i);
+					auto name = this->GetFileName(i);
+					auto subp = this->GetSubPathName(i);
+					auto folder = this->GetFolderName(i);
+					auto bucketName = folder;
+
+					if (file.Hashed)
+					{
+						filesWereRemoved = true;
+					}
+					else
+					{
+						newFilesThatNeedTheirHashCalculated.push_back(i);
+					}
+				}
+
+				std::swap(filesThatNeedTheirHashCalculated, newFilesThatNeedTheirHashCalculated);
+			}
+		}
 
 		//=============================================================================================================================================================================================
 		// now, we want to bucketize each item we need to calculcate a hash for based on the folder it's in
 		//=============================================================================================================================================================================================
-		std::unordered_map<std::string, folderbucket> bucket_map;
+		std::unordered_map<std::string, FolderBucket> bucket_map;
 
 		for (auto &i : filesThatNeedTheirHashCalculated)
 		{
@@ -701,15 +913,22 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 			auto name = this->GetFileName(i);
 			auto subp = this->GetSubPathName(i);
 			auto folder = this->GetFolderName(i);
+			auto bucketName = folder;
 
-			auto& bucket_iter = bucket_map.find(folder);
+			if (sortOnSize)
+			{
+				bucketName = path;
+			}
+
+			auto& bucket_iter = bucket_map.find(bucketName);
 			if (bucket_iter == bucket_map.end())
 			{
-				folderbucket newbucket;
+				FolderBucket newbucket;
 				newbucket.folder = folder;
 				newbucket.size = 0;
-				bucket_map[folder] = std::move(newbucket);
-				bucket_iter = bucket_map.find(folder);
+				bucket_map[bucketName] = std::move(newbucket);
+				bucket_iter = bucket_map.find(bucketName);
+				assert(bucket_iter != bucket_map.end());
 			}
 
 			auto& bucket = bucket_iter->second;
@@ -723,7 +942,8 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 		//=============================================================================================================================================================================================
 		// now, sort the list of buckets
 		//=============================================================================================================================================================================================
-		std::vector<folderbucket> folderbucketlist(bucket_map.size());
+		std::vector<FolderBucket> folderbucketlist;
+		folderbucketlist.reserve(bucket_map.size());
 
 		for (auto &bucket_item : bucket_map)
 		{
@@ -731,99 +951,93 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 			folderbucketlist.push_back(bucket);
 		}
 
-#if 1
 		// sort on size
 		{
-			TimeThis t("Sort 3");
-			std::sort(folderbucketlist.begin(), folderbucketlist.end(), [&](folderbucket const &left, folderbucket const &right)
+			TimeThis t("Sort on bucket size");
+
+			if (sortReverse)
 			{
-				return left.size > right.size;
-			});
+				std::sort(folderbucketlist.begin(), folderbucketlist.end(), [&](FolderBucket const &left, FolderBucket const &right)
+				{
+					return left.size < right.size;
+				});
+			}
+			else
+			{
+				std::sort(folderbucketlist.begin(), folderbucketlist.end(), [&](FolderBucket const &left, FolderBucket const &right)
+				{
+					return left.size > right.size;
+				});
+			}
 		}
-#endif
 
 		//=============================================================================================================================================================================================
 		// now, process each bucket
 		//=============================================================================================================================================================================================
-		size_t totalNumFiles = 0;
-		size_t numFilesProcessed = 0;
+		HashBucketInfo hbi;
+		hbi.totalBuckets = folderbucketlist.size();
+
 		for (auto& bucket : folderbucketlist)
 		{
-			totalNumFiles += bucket.files.size();
+			hbi.totalNumFiles += bucket.files.size();
+			hbi.totalBytesToProcess += bucket.size;
 		}
 
-
-		for (auto &bucket : folderbucketlist)
+		// calculate ALL the hashes
+		if (true)
 		{
-			Md5Cache cache;
-			char szPath[maxString];
-			strcpy_s(szPath, bucket.folder.c_str());
-			strcat_s(szPath, "\\");
-			strcat_s(szPath, pszLocalCacheFileName);
-			bool dirty = false;
+			TimeThis t("Calulating all MD5 Hashes");
 
-			std::unordered_map<Path, size_t> umap;
-
-			if (cache.Load(szPath))
+			if (FileOnDiskSet::_numCores == -1)
 			{
-				size_t index = 0;
-				for (auto& item : cache.Items)
-				{
-					umap[cache.GetFileName(item)] = index;
-					index++;
-				}
-			}
-			else
-			{
-				cache.Items.clear();
-				cache.Strings.clear();
+				FileOnDiskSet::_numCores = std::thread::hardware_concurrency();
 			}
 
-			// got through each file in the bucket
-			for (auto& index : bucket.files)
+			//
+			// allocate threads
+			//
+			std::vector<std::thread> threads;//(FileOnDiskSet::_numCores);
+
+			auto hashCalcStart = std::chrono::system_clock::now();
+
+			for (auto &bucket : folderbucketlist)
 			{
-				TimeThis t("    Calulating hash");
-
-				FileOnDisk& file = this->Items[index];
-				auto path = this->GetFilePath(file);
-				auto name = this->GetFileName(file);
-				auto subp = this->GetSubPathName(file);
-
-				verboseprintf("Calculating hash for \"%s\"...\n", this->GetFilePath(file));
-				file.Hashed = GetFileMd5Hash(this->GetFilePath(file), file.Hash, verbose);
-				Logger::Get().printf(Logger::Level::Info, "(%13s) Calculating MD5 hash for \"%s\"\n", comma(file.Size), this->GetFilePath(file));
-				hashedCount++;
-				byteCount += file.Size;
-
-				if (umap.find(name) == umap.end())
+				if (ControlCHandler::TestShouldTerminate())
 				{
-					Md5CacheItem item = file;
-					const char* pszName = name;
-					item.Name = static_cast<long>(cache.Strings.size());
-					cache.Strings.insert(cache.Strings.end(), pszName, pszName + strlen(pszName) + 1);
-					cache.Items.push_back(item);
-					dirty = true;
-				}
-				else
-				{
-					// it already exists... overwrite it
-					size_t cache_index = umap[name];
-					Md5CacheItem item = file;
-					item.Name = cache.Items[cache_index].Name;
-					cache.Items[cache_index] = item;
-					dirty = true;
+					//
+					// ensure all threads are finished
+					//
+					for (auto& thread : threads)
+					{
+						thread.join();
+					}
+
+					return;
 				}
 
-				UpdateProgressBar(numFilesProcessed, totalNumFiles);
-				++numFilesProcessed;
+				while (threads.size() >= iMaxNumThreads)
+				{
+					// wait
+					threads.erase(std::remove_if(threads.begin(), threads.end(), [](std::thread& thread) {if (thread.joinable()) { thread.join(); return true; } return false; }), threads.end());
+					if (threads.size() >= iMaxNumThreads)
+					{
+						Sleep(100);
+					}
+				}
+
+				int iNumThreads = static_cast<int>(threads.size());
+
+				threads.emplace_back([&]() {CalcAllNeededHashesFromOneBucket(bucket, hbi, t, hashCalcStart, verbose, hashedCount, byteCount, iNumThreads); });
 			}
 
-			if (dirty)
+			//
+			// ensure all threads are finished
+			//
+			for (auto& thread : threads)
 			{
-				cache.Save(szPath);
+				thread.join();
 			}
 		}
-
 
 		Logger::Get().printf(Logger::Level::Debug, "Calculated the hash of %d files for %s bytes.\n", hashedCount, comma(byteCount));
 	}
@@ -833,12 +1047,13 @@ void FileOnDiskSet::UpdateHashedFiles(bool forceAll, bool verbose)
 //=====================================================================================================================================================================================================
 void FileOnDiskSet::RemoveSetFromSet(const FileOnDiskSet &infiles)
 {
+	TimeThis t("Remove files from one FileOnDiskSet in another FileOnDiskSet");
+
 	// create a path map of the infiles
 	std::unordered_map<Path, size_t> umap;
 
 	if (true)
 	{
-		TimeThis t("Build the hashtable");
 		umap.reserve(infiles.Items.size());
 
 		int index = 0;
@@ -950,7 +1165,7 @@ bool Md5Cache::Load(const char *pszFileName)
 {
 	bool result = false;
 
-	HANDLE hFile = CreateFileA(pszFileName, GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
+	HANDLE hFile = CreateFileU(pszFileName, GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
 
 	if (nullptr != hFile && INVALID_HANDLE_VALUE != hFile)
 	{
@@ -1023,7 +1238,7 @@ bool Md5Cache::Save(const char *pszFileName)
 {
 	bool result = false;
 
-	HANDLE hFile = CreateFileA(pszFileName, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
+	HANDLE hFile = CreateFileU(pszFileName, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
 
 	if (nullptr != hFile && INVALID_HANDLE_VALUE != hFile)
 	{
@@ -1039,6 +1254,12 @@ bool Md5Cache::Save(const char *pszFileName)
 
 		CloseHandle(hFile);
 	}
+	else
+	{
+		Logger::Get().printf(Logger::Level::Error, "Error creating MD5 Cache file in \"%s\"! (%S, %d)\n", pszFileName, GetLastErrorString(), GetLastError());
+		__nop();// throw new Exception();
+	}
+
 
 	return result;
 }
@@ -1097,6 +1318,9 @@ bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose)
 	const int bufferSize = 1024;
 #endif
 
+	// "\\parker\all$\ToCheck\Puma\Raid\Video\Encode_2017-04-18\Rogue One.mkv"
+	// FindDupes.exe /w "\\parker\all$\Mike\Raid\Video\Encode_2017-04-18" /I "\\parker\all$\ToCheck\Puma\Raid\Video\Encode_2017-04-18"
+
 	HANDLE hFile = nullptr;
 	bool result = false;
 	HCRYPTPROV hProv = 0;
@@ -1106,14 +1330,32 @@ bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose)
 	const int hashLen = 16;
 	unsigned char hash[hashLen];
 	DWORD dwSize;
+	ProgressBar pb;
 
 	// open the file
-	hFile = CreateFileA(szFileName, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+	hFile = CreateFileU(szFileName, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
 
 	if (INVALID_HANDLE_VALUE == hFile)
 	{
+		Logger::Get().printf(Logger::Level::Error, "Error opening \"%s\"! (%S, %d)\n", szFileName, GetLastErrorString(), GetLastError());
 		goto Cleanup;
 	}
+
+	//
+	// get the file info
+	//
+	BY_HANDLE_FILE_INFORMATION fileInfo;
+	LARGE_INTEGER filesize;
+	if (GetFileInformationByHandle(hFile, &fileInfo))
+	{
+		filesize.HighPart = fileInfo.nFileSizeHigh;
+		filesize.LowPart = fileInfo.nFileSizeLow;
+	}
+
+	LONGLONG readSoFar = 0;
+	LONGLONG updateProgressBarAmount = filesize.QuadPart / 1000;
+	LONGLONG nextProgressBarUpdate = updateProgressBarAmount;
+	pb.Update(readSoFar, filesize.QuadPart);
 
 	// Get handle to the crypto provider
 	if (!CryptAcquireContext(&hProv, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
@@ -1130,9 +1372,21 @@ bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose)
 	// loop, reading the file's contents
 	while (ReadFile(hFile, &buffer[0], static_cast<DWORD>(buffer.size()), &cbRead, nullptr))
 	{
+		if (ControlCHandler::TestShouldTerminate())
+		{
+			goto Cleanup;
+		}
+
 		if (0 == cbRead)
 		{
 			break;
+		}
+
+		readSoFar += cbRead;
+		if (readSoFar >= nextProgressBarUpdate)
+		{
+			pb.Update(readSoFar, filesize.QuadPart);
+			nextProgressBarUpdate += updateProgressBarAmount;
 		}
 
 		if (!CryptHashData(hHash, &buffer[0], cbRead, 0))
@@ -1231,7 +1485,7 @@ bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose)
 			const Md5CacheItem *pcacheitem = umap[pszFileNameOnly];
 
 			// now, see if it's valid
-			HANDLE hFile = CreateFileA(szFileName, FILE_READ_ATTRIBUTES| FILE_READ_EA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
+			HANDLE hFile = CreateFileU(szFileName, FILE_READ_ATTRIBUTES| FILE_READ_EA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, nullptr);
 
 			if (nullptr != hFile && INVALID_HANDLE_VALUE != hFile)
 			{
@@ -1263,14 +1517,25 @@ bool GetCachedHash(const char *szFileName, Md5Hash &hash, bool verbose)
 
 
 //=====================================================================================================================================================================================================
+// returns if there are no children
 //=====================================================================================================================================================================================================
-static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
+static bool CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 {
 	Md5Cache cache;
 	Md5Cache newCache;
 	std::unordered_map<Path,const Md5CacheItem *> umap;
 	std::unordered_map<Path,const Md5CacheItem *> *pumap = nullptr;
 	auto foldercache = GetCacheFileName(szFolderName);
+
+
+#ifdef _DEBUG
+	if (0 == _stricmp(szFolderName, "\\\\duvall\\All$\\Public\\Photos\\ToCheck\\1"))
+	{
+		__nop();
+	}
+#endif
+
+	if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 	{
 		if (cache.Load(foldercache.c_str()))
@@ -1287,31 +1552,73 @@ static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 		}
 	}
 
-	ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache, &cleanEmptyFolders](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
+	if (ControlCHandler::TestShouldTerminate()) { return false; }
+
+	bool noChildren = true;
+
+	//
+	// Loop through all of a folder's items
+	//
+	ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache, &cleanEmptyFolders, &noChildren](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
 	{
-		WIN32_FIND_DATAA	&fd = *pfd;
+		if (ControlCHandler::TestShouldTerminate()) { return; }
+
+		WIN32_FIND_DATAA &fd = *pfd;
 
 		if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
 		{
+			//
+			// this item is a folder
+			//
 			std::string	newPathName{szFolderName};
 
 			newPathName.append(R"(\)");
 			newPathName.append(fd.cFileName);
 
-			CleanFolderRecurse(newPathName.c_str(), cleanEmptyFolders);
+			bool noSubChildren = CleanFolderRecurse(newPathName.c_str(), cleanEmptyFolders);
+			if (!noSubChildren)
+			{
+				noChildren = false;
+			}
 
-			if (cleanEmptyFolders)
+			if (cleanEmptyFolders && noSubChildren)
 			{
 				// ignore return value
-				auto result = RemoveDirectoryA(newPathName.c_str());
+				auto result = RemoveDirectoryU(newPathName.c_str());
 				if (result)
 				{
 					Logger::Get().printf(Logger::Level::Info, "Deleting empty folder \"%s\"\n", newPathName.c_str());
+				}
+				else
+				{
+					Logger::Get().printf(Logger::Level::Error, "Error deleting empty folder \"%s\"\n", newPathName.c_str());
 				}
 			}
 		}
 		else
 		{
+			//
+			// this item is a file
+			//
+
+			//
+			// see if the file is an "important" file (i.e., not one that can be safely deleted)
+			//
+			bool importantFile = true;
+			for (auto& pszIgnoreFileName : szFileNamesToSafelyDelete)
+			{
+				if (0 == _stricmp(pszIgnoreFileName, fd.cFileName))
+				{
+					importantFile = false;
+					break;
+				}
+			}
+
+			if (importantFile)
+			{
+				noChildren = false;
+			}
+
 			if (umap.find(fd.cFileName) != umap.end())
 			{
 				const Md5CacheItem *pitem = umap[fd.cFileName];
@@ -1341,7 +1648,7 @@ static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 					}
 					else
 					{
-						Logger::Get().printf(Logger::Level::Debug, "Cache entry found and used for file \"%s\"\n", fd.cFileName);
+						//Logger::Get().printf(Logger::Level::Debug, "Cache entry found and used for file \"%s\"\n", fd.cFileName);
 
 						// add it to the new cache!!
 
@@ -1357,11 +1664,13 @@ static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 			else
 			{
 				// it's a file that's not in the Md5Cache
-				Logger::Get().printf(Logger::Level::Debug, "No cache entry found for file \"%s\"\n", fd.cFileName);
+				//Logger::Get().printf(Logger::Level::Debug, "No cache entry found for file \"%s\"\n", fd.cFileName);
 				__nop();
 			}
 		}
 	});
+
+	if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 	if (0 == newCache.Items.size() && (0 != cache.Items.size()))
 	{
@@ -1379,7 +1688,42 @@ static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 		newCache.Save(foldercache.c_str());
 	}
 
-	return;
+	if (noChildren)
+	{
+		// we can safely delete all files from this folder
+		ProcessFilesInFolder(szFolderName, 0, [&umap,&cache,&newCache, &cleanEmptyFolders, &noChildren](const char *szFolderName, WIN32_FIND_DATAA *pfd, int depth)
+		{
+			if (ControlCHandler::TestShouldTerminate()) { return; }
+
+			WIN32_FIND_DATAA &fd = *pfd;
+
+			if (0 != (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+			{
+				// this should never happen!!
+				__nop();
+			}
+			else
+			{
+				Logger::Get().printf(Logger::Level::Info, "Deleting \"%s\\%s\"\n", szFolderName, fd.cFileName);
+				auto r=DeleteFileU(szFolderName, fd.cFileName);
+				if (r)
+				{
+					__nop();
+				}
+				else
+				{
+					noChildren = false;
+				}
+			}
+
+		}, false);
+	}
+	else
+	{
+		__nop();
+	}
+
+	return noChildren;
 }
 
 
@@ -1387,5 +1731,6 @@ static void CleanFolderRecurse(const char *szFolderName, bool cleanEmptyFolders)
 //=====================================================================================================================================================================================================
 void CleanCacheFiles(const char *pszRootPath, bool cleanEmptyFolders)
 {
+	if (ControlCHandler::TestShouldTerminate()) { return; }
 	CleanFolderRecurse(pszRootPath, cleanEmptyFolders);
 }

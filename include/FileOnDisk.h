@@ -175,6 +175,32 @@ struct HashCacheHeader
 	long long		numFiles;
 };
 
+
+//=====================================================================================================================================================================================================
+// create a set of buckets for each folder
+//=====================================================================================================================================================================================================
+struct FolderBucket
+{
+	std::string	folder;
+	std::size_t size=0;
+	std::list<std::size_t> files;
+};
+
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+struct HashBucketInfo
+{
+	size_t totalNumFiles = 0;
+	long long totalBytesToProcess = 0;
+	long long totalBytesProcessed = 0;
+	size_t numFilesProcessed = 0;
+	size_t totalBuckets = 0;
+	size_t numBucketsProcessed = 0;
+	std::mutex mutex;
+};
+
+
 //=====================================================================================================================================================================================================
 // File on Disk structure
 //
@@ -200,7 +226,7 @@ struct FileOnDisk
 	mutable DWORD   			nNumberOfLinks;
 	mutable unsigned long long	nFileIndex;
 
-	inline char *HashToString() const
+	inline const char *HashToString() const
 	{
 		if (this->Hashed)
 		{
@@ -212,6 +238,63 @@ struct FileOnDisk
 		}
 	}
 };
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+enum class FindDupesFlags : uint32_t
+{
+	None			= 0x0000,
+
+	Verbose			= 0x0001,
+	SortOnSize		= 0x0002,
+	SortInReverse	= 0x0004,
+	ForceAll		= 0x0008,
+	MaxNumThreads	= 0xFF00,
+};
+
+
+static inline FindDupesFlags operator |(const FindDupesFlags &a, const FindDupesFlags &b)
+{
+	return static_cast<FindDupesFlags>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+static inline FindDupesFlags operator &(const FindDupesFlags &a, const FindDupesFlags &b)
+{
+	return static_cast<FindDupesFlags>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+static inline bool TestFindDupesFlags(const FindDupesFlags &left, const FindDupesFlags &right)
+{
+	return (left & right) != FindDupesFlags::None;
+}
+
+static inline void SetFindDupesFlags(FindDupesFlags &flags, const FindDupesFlags &bits, bool shouldSet=true)
+{
+	if (shouldSet)
+	{
+		flags = flags | bits;
+	}
+}
+
+static inline uint32_t GetMaxNumThreads(FindDupesFlags &flags)
+{
+	uint32_t numThreads = static_cast<uint32_t>(flags);
+	uint32_t numThreadsMask = static_cast<uint32_t>(FindDupesFlags::MaxNumThreads);
+	numThreads = (numThreads & numThreadsMask) >> 8;
+	return numThreads;
+}
+
+static inline void SetMaxNumThreads(FindDupesFlags &flags, uint32_t numThreads)
+{
+	uint32_t uiFlags = static_cast<uint32_t>(flags);
+	uint32_t numThreadsMask = static_cast<uint32_t>(FindDupesFlags::MaxNumThreads);
+
+	// clear the number of threads
+	uiFlags &= ~numThreadsMask;
+	uiFlags |= (numThreads << 8) & numThreadsMask;
+
+	flags = static_cast<FindDupesFlags>(uiFlags);
+}
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
@@ -298,13 +381,17 @@ public:
 	void RemoveSetFromSet(const FileOnDiskSet &infiles);
 
 	// calculate the hash for all files in the set that need it
-	void UpdateHashedFiles(bool forceAll=false, bool verbose=false);
+	void UpdateHashedFiles(FindDupesFlags flags);
 
 	// read in from the file system (including relevant md5cache.md5 files)
 	void QueryFileSystem(const char *pszRootPath, bool clean=false);
 
 	// update a single one
 	bool UpdateFile(const FileOnDisk &file);
+
+	// calc hashes of files in a bucket
+	void CalcAllNeededHashesFromOneBucket(FolderBucket& bucket, HashBucketInfo& hbi, TimeThis& t, std::chrono::system_clock::time_point& hashCalcStart, bool verbose, int& hashedCount, long long& byteCount, int iNum);
+
 
 	//=================================================================================================================================================================================================
 	//=================================================================================================================================================================================================
@@ -320,6 +407,9 @@ public:
 		}
 #endif
 	}
+
+private:
+	static int _numCores;
 };
 
 //=====================================================================================================================================================================================================
@@ -371,10 +461,12 @@ struct Md5Cache
 };
 
 
-
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
 __declspec(selectany) const char * pszLocalCacheFileName = "md5cache.md5";
 __declspec(selectany) const char * pszOldLocalCacheFileName = "md5cache.bin";
 
 extern void CleanCacheFiles(const char *pszRootPath, bool cleanEmptyFolders);
+extern bool CalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose);
+//extern bool ParallelCalcFileMd5Hash(const char *szFileName, Md5Hash &chash, bool verbose);
+

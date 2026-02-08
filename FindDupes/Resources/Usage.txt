@@ -27,6 +27,11 @@ Options:
     /C               Clean md5cache.md5 files and delete empty folders.
     /a               Generate md5cache entries for every file.
     /v               Verbose console output.
+    /t               When generating hashes, sort by file size.
+    /T               When generating hashes, sort by folder size.
+    /r               Sort in reverse order.
+    /R               Sort in normal order.
+    /q number        Specify the maximum parallelization of buckets.
     /i folder        Specify an "in" folder.
     /I folder        Specify an "in" folder, and generate a delete script.
     /s folder folder Sync two folders.

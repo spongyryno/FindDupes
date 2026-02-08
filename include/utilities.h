@@ -2,8 +2,59 @@
 //=====================================================================================================================================================================================================
 #define verboseprintf(fmt, ...) if (verbose) { Logger::Get().printf(Logger::Level::Info, fmt, __VA_ARGS__); }
 
+
 //=====================================================================================================================================================================================================
+// UTF8 based CreateFile
 //=====================================================================================================================================================================================================
+extern HANDLE WINAPI CreateFileU(
+	_In_ LPCSTR lpFileName,
+	_In_ DWORD dwDesiredAccess,
+	_In_ DWORD dwShareMode,
+	_In_opt_ LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+	_In_ DWORD dwCreationDisposition,
+	_In_ DWORD dwFlagsAndAttributes,
+	_In_opt_ HANDLE hTemplateFile
+);
+
+
+//=====================================================================================================================================================================================================
+// Utf8 based FindFirstFileEx
+//=====================================================================================================================================================================================================
+extern HANDLE WINAPI FindFirstFileExU(
+	_In_ LPCSTR lpFileName,
+	_In_ FINDEX_INFO_LEVELS fInfoLevelId,
+	_Out_writes_bytes_(sizeof(WIN32_FIND_DATAA)) LPVOID lpFindFileData,
+	_In_ FINDEX_SEARCH_OPS fSearchOp,
+	_Reserved_ LPVOID lpSearchFilter,
+	_In_ DWORD dwAdditionalFlags
+);
+
+
+//=====================================================================================================================================================================================================
+// Utf based FindNextFile
+//=====================================================================================================================================================================================================
+extern BOOL WINAPI FindNextFileU(
+	_In_ HANDLE hFindFile,
+	_Out_ LPWIN32_FIND_DATAA lpFindFileData
+);
+
+
+//=====================================================================================================================================================================================================
+// UTF8 based Remove Directory
+//=====================================================================================================================================================================================================
+extern BOOL RemoveDirectoryU(
+	_In_ LPCSTR lpPathName
+);
+
+
+//=====================================================================================================================================================================================================
+// UTF8 based Remove File
+//=====================================================================================================================================================================================================
+extern BOOL DeleteFileU(
+	_In_ LPCSTR lpPathName,
+	_In_ LPCSTR lpFileName
+);
+
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
@@ -31,7 +82,7 @@ template<> inline bool fexists<wchar_t>(const wchar_t *filename)
 //=====================================================================================================================================================================================================
 template<> inline bool fexists<char>(const char *filename)
 {
-	HANDLE hFile = CreateFileA(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	HANDLE hFile = CreateFileU(filename, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if ((nullptr != hFile) && (INVALID_HANDLE_VALUE != hFile))
 	{
 		CloseHandle(hFile);
@@ -47,7 +98,7 @@ inline FILETIME GetFileTimeStamp(const char *pszFilePath)
 {
 	FILETIME null{ 0 };
 
-	HANDLE hFile = CreateFileA(pszFilePath, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	HANDLE hFile = CreateFileU(pszFilePath, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if ((nullptr != hFile) && (INVALID_HANDLE_VALUE != hFile))
 	{
 		BY_HANDLE_FILE_INFORMATION fi{0};
@@ -70,6 +121,17 @@ inline FILETIME GetFileTimeStamp(const char *pszFilePath)
 inline long long FileTimeToUInt64(const FILETIME &filetime)
 {
 	return *reinterpret_cast<const long long *>(&filetime.dwLowDateTime);
+}
+
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+inline wchar_t *GetLastErrorString()
+{
+	DWORD dwLastError = GetLastError();
+	static wchar_t szMessage[MAX_PATH] = {0};
+	FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, dwLastError, 0, szMessage, _countof(szMessage), 0);
+	return &szMessage[0];
 }
 
 
@@ -150,15 +212,21 @@ public:
 
 	~TimeThis()
 	{
-		QueryPerformanceCounter(&time2);
-		double seconds = (double)(time2.QuadPart - time1.QuadPart)/(double)freq.QuadPart;
+		double seconds = this->Elapsed();
 		Logger::Get().printf(Logger::Level::Debug, "It took %15.5f seconds (%s)\n", seconds, this->desc);
+	}
+
+	double Elapsed() const
+	{
+		LARGE_INTEGER time2;
+		QueryPerformanceCounter(&time2);
+		double seconds = (double)(time2.QuadPart - time1.QuadPart) / (double)freq.QuadPart;
+		return seconds;
 	}
 
 private:
 	LARGE_INTEGER freq;
 	LARGE_INTEGER time1;
-	LARGE_INTEGER time2;
 	const char *desc;
 };
 
@@ -208,7 +276,7 @@ inline void SafeCloseHandle(HANDLE &handle)
 //  return value	A pointer to a static string
 //
 //=====================================================================================================================================================================================================
-__declspec(noinline) inline char *comma(unsigned __int64 n)
+__declspec(noinline) inline const char *comma(unsigned __int64 n)
 {
 	const int numStrings = 8; // must be a power of two!!
 	const int stringLength = 256;
@@ -269,6 +337,11 @@ inline bool RelativeToFullpath(char *szPath, size_t lenInCharacters)
 					return true;
 				}
 			}
+		}
+		else
+		{
+			Logger::Get().printf(Logger::Level::Error, "Error changing to path \"%s\"! (%S, %d)\n", szPath, GetLastErrorString(), GetLastError());
+			__nop();
 		}
 	}
 
@@ -340,4 +413,44 @@ template<> inline const char* EscapeJsonString<char>(const char *str)
 }
 
 
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+class ControlCHandler
+{
+public:
+	ControlCHandler();
+	~ControlCHandler();
+	static bool TestShouldTerminate();
 
+private:
+};
+
+
+//=====================================================================================================================================================================================================
+//
+// LoadResource
+//
+// Read a resource into memory, return a pointer to it, and optionally
+// return the size of the resource
+//
+// in:
+//	hInst		handle to the application instance
+//	szItem		the resource identifier
+//	pdwSize		pointer to size
+//
+// out:
+//	LPVOID		pointer to the memory
+//
+//=====================================================================================================================================================================================================
+extern void *LoadResource(HINSTANCE hInst, LPCWSTR szType, LPCWSTR szItem, DWORD *pdwSize=nullptr);
+extern void *LoadResource(HINSTANCE hInst, size_t szType, size_t szItem, DWORD *pdwSize=nullptr);
+extern std::wstring GetLocalBinaryVersionString(void);
+
+
+//=====================================================================================================================================================================================================
+// Conversion functions for Unicode/UTF-8
+//=====================================================================================================================================================================================================
+extern std::string UnicodeToUtf8(const std::wstring& wstr);
+extern std::wstring Utf8ToUnicode(const std::string& str);
+
+extern std::string EscapePowerShellString(const char *pszInString);

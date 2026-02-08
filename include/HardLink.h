@@ -32,15 +32,15 @@ private:
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
-inline bool AreFilesHardLinkedToEachOther(TCHAR *file1, TCHAR *file2)
+inline bool AreFilesHardLinkedToEachOther(char *file1, char *file2)
 {
-	if (0 == _tcscmp(file1, file2))
+	if (0 == strcmp(file1, file2))
 	{
 		return false;
 	}
 
-	AutoCloseHandle	hfile1 = CreateFile(file1, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
-	AutoCloseHandle	hfile2 = CreateFile(file2, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	AutoCloseHandle	hfile1 = CreateFileU(file1, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	AutoCloseHandle	hfile2 = CreateFileU(file2, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
 
 	if (hfile1 && hfile2)
 	{
@@ -74,7 +74,7 @@ inline unsigned long long MAKE_LONGLONG(const DWORD &hi, const DWORD &lo)
 //=====================================================================================================================================================================================================
 inline int GetHardLinkCount(const char *pszFileName, unsigned long long *pszFileIndex=nullptr)
 {
-	AutoCloseHandle	hfile = CreateFileA(pszFileName, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	AutoCloseHandle	hfile = CreateFileU(pszFileName, 0, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 
 	if ((hfile != nullptr) && (hfile != INVALID_HANDLE_VALUE))
 	{
@@ -144,44 +144,19 @@ inline std::vector<std::wstring> GetAllHardLinksW(const wchar_t *pszFileName)
 }
 
 
-
-//=====================================================================================================================================================================================================
-//=====================================================================================================================================================================================================
-inline std::string UnicodeToAnsi(const std::wstring &src)
-{
-	size_t s = src.size();
-
-	int size_needed = WideCharToMultiByte(CP_ACP, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr);
-	char *pstring = (char *)_alloca(size_needed * sizeof(char));
-	WideCharToMultiByte(CP_ACP, 0, src.c_str(), -1, pstring, size_needed, nullptr, nullptr);
-	return std::string(pstring);
-}
-
-//=====================================================================================================================================================================================================
-//=====================================================================================================================================================================================================
-inline std::wstring AnsiToUnicode(const std::string &src)
-{
-	size_t s = src.size();
-
-	int size_needed = MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, nullptr, 0);
-	wchar_t *pwstring = (wchar_t *)_alloca(size_needed * sizeof(wchar_t));
-	MultiByteToWideChar(CP_ACP, 0, src.c_str(), -1, pwstring, size_needed);
-	return std::wstring(pwstring);
-}
-
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
 inline std::vector<std::string> GetAllHardLinksA(const char *pszFileName)
 {
 	std::vector<std::string> results;
-	std::vector<std::wstring> wresults = GetAllHardLinksW(AnsiToUnicode(std::string(pszFileName)).c_str());
+	std::vector<std::wstring> wresults = GetAllHardLinksW(Utf8ToUnicode(std::string(pszFileName)).c_str());
 
 	// allocate enough space
 	results.reserve(wresults.size());
 
 	for (auto &i : wresults)
 	{
-		results.push_back(UnicodeToAnsi(i));
+		results.push_back(UnicodeToUtf8(i));
 	}
 
 	return results;

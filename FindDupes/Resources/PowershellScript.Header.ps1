@@ -1,3 +1,4 @@
-	param([switch]$DoIt)
+	param([switch]$DoIt, [switch]$DontCheckExistence)
 
 $files = @(
+
