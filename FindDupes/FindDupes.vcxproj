@@ -165,6 +165,7 @@
     <Text Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\include\ConsoleIcon.h" />
     <ClInclude Include="..\include\FileOnDisk.h" />
     <ClInclude Include="..\include\HardLink.h" />
     <ClInclude Include="..\include\utilities.h" />

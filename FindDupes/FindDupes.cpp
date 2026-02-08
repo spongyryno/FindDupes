@@ -3,6 +3,8 @@
 #include <utilities.h>
 #include <FileOnDisk.h>
 #include <HardLink.h>
+#include <console.h>
+#include <ConsoleIcon.h>
 #include "Build_Increment.h"
 #include "Resource.h"
 
@@ -14,95 +16,6 @@
 #define ASTRINGIZE(x) _ASTRINGIZE(x)
 
 #define BUILD_DATE_STRING ASTRINGIZE(BUILD_DATE)
-
-//=====================================================================================================================================================================================================
-//
-// LoadResource
-//
-// Read a resource into memory, return a pointer to it, and optionally
-// return the size of the resource
-//
-// in:
-//	hInst		handle to the application instance
-//	szItem		the resource identifier
-//	pdwSize		pointer to size
-//
-// out:
-//	LPVOID		pointer to the memory
-//
-//=====================================================================================================================================================================================================
-static void *LoadResource(HINSTANCE hInst, LPCWSTR szType, LPCWSTR szItem, DWORD *pdwSize=nullptr)
-{
-	HRSRC	hRsrcInfo;
-	HGLOBAL hGlobal;
-	LPVOID	pR;
-	DWORD	dwSize;
-
-	if (!(hRsrcInfo = FindResource( hInst, szItem, szType )))
-	{
-		return nullptr;
-	}
-
-	dwSize=SizeofResource(hInst, hRsrcInfo);
-
-	if (!(hGlobal = LoadResource(hInst, hRsrcInfo)))
-	{
-		return nullptr;
-	}
-
-	if (!(pR=LockResource(hGlobal)))
-	{
-		return nullptr;
-	}
-
-	if (pdwSize)
-		*pdwSize = dwSize;
-
-	return pR;
-}
-
-//=====================================================================================================================================================================================================
-//=====================================================================================================================================================================================================
-static void *LoadResource(HINSTANCE hInst, size_t szType, size_t szItem, DWORD *pdwSize=nullptr)
-{
-	return LoadResource(hInst, reinterpret_cast<LPCWSTR>(szType), reinterpret_cast<LPCWSTR>(szItem), pdwSize);
-}
-
-
-//=====================================================================================================================================================================================================
-//=====================================================================================================================================================================================================
-std::wstring GetLocalBinaryVersionString(void)
-{
-	TCHAR szModuleFileName[MAX_PATH];
-	VS_FIXEDFILEINFO *	verinfo;
-
-	GetModuleFileName(nullptr, szModuleFileName, ARRAYSIZE(szModuleFileName));
-
-	DWORD dwSize = GetFileVersionInfoSize(szModuleFileName, 0);
-	if (!dwSize)
-	{
-		return nullptr;
-	}
-
-	std::vector<BYTE> buffer = std::vector<BYTE>(dwSize);
-
-	if (!GetFileVersionInfo(szModuleFileName, 0, dwSize, &buffer[0]))
-	{
-		return nullptr;
-	}
-
-	if (!VerQueryValue(&buffer[0], _T("\\"), (void **)&verinfo, (UINT *)&dwSize))
-	{
-		return nullptr;
-	}
-
-	return
-		std::to_wstring(HIWORD(verinfo->dwFileVersionMS)) + L"." +
-		std::to_wstring(LOWORD(verinfo->dwFileVersionMS)) + L"." +
-		std::to_wstring(HIWORD(verinfo->dwFileVersionLS)) + L"." +
-		std::to_wstring(LOWORD(verinfo->dwFileVersionLS));
-}
-
 
 //=====================================================================================================================================================================================================
 // Command line options
@@ -120,6 +33,7 @@ struct CommandLineOptions
 	char szSyncFolderLeft[maxPathLength];
 	char szSyncFolderRght[maxPathLength];
 
+	int maxNumThreads;
 
 	// options
 	bool trim = false;
@@ -132,6 +46,8 @@ struct CommandLineOptions
 	bool verbose = false;
 	bool generateHashForAllFiles = false;
 	bool syncFolders = false;
+	bool sortOnSize = false;
+	bool sortInReverse = false;
 };
 
 
@@ -139,7 +55,7 @@ struct CommandLineOptions
 //=====================================================================================================================================================================================================
 // Parse through the command line options
 //=====================================================================================================================================================================================================
-bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &commandLineOptions)
+bool GetCommandLineOptions(int argc, wchar_t* argv[], CommandLineOptions &commandLineOptions)
 {
 	std::wstring _szDupesLogFile;
 
@@ -225,7 +141,12 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 				}
 
 				++i;
-				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, commandLineOptions.szInFolder, sizeof(commandLineOptions.szInFolder), nullptr, nullptr);
+
+				//
+				// convert the "in" folder from Unicode to UTF-8
+				//
+				std::string sInFolder = UnicodeToUtf8(argv[i]);
+				strcpy_s(commandLineOptions.szInFolder, sInFolder.c_str());
 				commandLineOptions.infile = true;
 			}
 			else if (L'w' == argv[i][1])
@@ -237,13 +158,34 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 				}
 
 				++i;
-				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, commandLineOptions.szRootFolder, sizeof(commandLineOptions.szRootFolder), nullptr, nullptr);
+
+				//
+				// convert the woring folder from Unicode to UTF-8
+				//
+				std::string sWorkingFolder = UnicodeToUtf8(argv[i]);
+				strcpy_s(commandLineOptions.szRootFolder, sWorkingFolder.c_str());
 
 				if (!RelativeToFullpath(commandLineOptions.szRootFolder, ARRAYSIZE(commandLineOptions.szRootFolder)))
 				{
 					Logger::Get().printf(Logger::Level::Error, "Error: could not resolve \"%s\"\n", commandLineOptions.szRootFolder);
 					return false;
 				}
+			}
+			else if (L'q' == argv[i][1])
+			{
+				if (argc < i + 1)
+				{
+					Logger::Get().printf(Logger::Level::Error, "Error: missing arg\n");
+					return false;
+				}
+
+				++i;
+
+				//
+				// convert the woring folder from Unicode to UTF-8
+				//
+				uint32_t maxNumThreads = _wtoi(argv[i]);
+				commandLineOptions.maxNumThreads = maxNumThreads;
 			}
 			else if (L'n' == argv[i][1])
 			{
@@ -271,6 +213,22 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 			{
 				commandLineOptions.generateHashForAllFiles = true;
 			}
+			else if (L't' == argv[i][1])
+			{
+				commandLineOptions.sortOnSize = true;
+			}
+			else if (L'T' == argv[i][1])
+			{
+				commandLineOptions.sortOnSize = false;
+			}
+			else if (L'r' == argv[i][1])
+			{
+				commandLineOptions.sortInReverse = true;
+			}
+			else if (L'R' == argv[i][1])
+			{
+				commandLineOptions.sortInReverse = false;
+			}
 			else if (L's' == argv[i][1])
 			{
 				if (argc < i + 2)
@@ -280,11 +238,12 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 				}
 
 				++i;
-				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, commandLineOptions.szSyncFolderLeft, sizeof(commandLineOptions.szSyncFolderLeft), nullptr, nullptr);
+				std::string sSyncFolderLeft = UnicodeToUtf8(argv[i]);
+				strcpy_s(commandLineOptions.szSyncFolderLeft, sSyncFolderLeft.c_str());
 
 				++i;
-				WideCharToMultiByte(CP_ACP, 0, argv[i], -1, commandLineOptions.szSyncFolderRght, sizeof(commandLineOptions.szSyncFolderRght), nullptr, nullptr);
-				commandLineOptions.syncFolders = true;
+				std::string sSyncFolderRght = UnicodeToUtf8(argv[i]);
+				strcpy_s(commandLineOptions.szSyncFolderRght, sSyncFolderRght.c_str());
 
 				if (!RelativeToFullpath(commandLineOptions.szSyncFolderLeft, ARRAYSIZE(commandLineOptions.szSyncFolderLeft)))
 				{
@@ -297,7 +256,6 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 					Logger::Get().printf(Logger::Level::Error, "Error: could not resolve \"%s\"\n", commandLineOptions.szSyncFolderRght);
 					return false;
 				}
-
 			}
 			else
 			{
@@ -327,7 +285,7 @@ bool GetCommandLineOptions(int argc, _TCHAR* argv[], CommandLineOptions &command
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
-void GenerateHashForAllFiles(const char *szRootFolder, bool verbose)
+void GenerateHashForAllFiles(const char *szRootFolder, bool verbose, bool sortOnSize, bool sortInReverse)
 {
 	const size_t itemsSizeReserve = 500000;
 	const size_t avgStringSizeToReserve = 128;
@@ -348,7 +306,11 @@ void GenerateHashForAllFiles(const char *szRootFolder, bool verbose)
 	// make sure all files that have the same size have updated hashes, and save the hash caches if necessary
 	{
 		TimeThis t("To update hashes");
-		files.UpdateHashedFiles(true, verbose);
+		FindDupesFlags flags = FindDupesFlags::ForceAll;
+		SetFindDupesFlags(flags, FindDupesFlags::Verbose, verbose);
+		SetFindDupesFlags(flags, FindDupesFlags::SortOnSize, sortOnSize);
+		SetFindDupesFlags(flags, FindDupesFlags::SortInReverse, sortInReverse);
+		files.UpdateHashedFiles(flags);
 	}
 }
 
@@ -572,7 +534,7 @@ void SyncFolders(const char *szSyncFolderLeft, const char *szSyncFolderRght, boo
 
 //=====================================================================================================================================================================================================
 //=====================================================================================================================================================================================================
-bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *szDupesPs1File, const wchar_t *szDupesCmdFile, bool includeDeleteScript, bool infile, bool verbose)
+bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *szDupesPs1File, const wchar_t *szDupesCmdFile, bool includeDeleteScript, bool infile, bool verbose, bool sortOnSize, bool sortInReverse, int maxNumThreads=1)
 {
 	// convert the infile to the full path name
 	if (infile)
@@ -615,14 +577,19 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 	files.Items.reserve(itemsSizeReserve);
 	files.Strings.reserve(itemsSizeReserve * avgStringSizeToReserve);
 
+	if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 	// read the files on disk
 	{
 		TimeThis t("Read the directory structure");
 		verboseprintf("Reading the directory structure...\n");
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
 		files.QueryFileSystem(szRootFolder);
 		files.CheckStrings();
 		Logger::Get().printf(Logger::Level::Debug, "There are %s files in the directory structure.\n", comma(files.Items.size()));
 	}
+
+	if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 	// log header
 	{
@@ -642,6 +609,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 		infiles.Items.reserve(itemsSizeReserve);
 		infiles.Strings.reserve(itemsSizeReserve * avgStringSizeToReserve);
 
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		// read the disk
 		{
 			TimeThis t("Read the \"in\" directory structure");
@@ -650,12 +619,16 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 			Logger::Get().printf(Logger::Level::Debug, "There are %s files in the \"in\" directory structure.\n", comma(infiles.Items.size()));
 		}
 
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		// remove all "infiles" from "files" that may exist
 		{
 			TimeThis t("Remove \"in\" files from the rest");
 			verboseprintf("Removing infiles from files...\n");
 			files.RemoveSetFromSet(infiles);
 		}
+
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 		// go through both lists and make sure that anything that may need a hash has one
 		{
@@ -670,11 +643,23 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 				allFiles.MergeFrom(infiles);
 			}
 
+			if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 			{
 				TimeThis t("Hash necessary files.");
 				verboseprintf("Hashing necessary files...\n");
-				allFiles.UpdateHashedFiles(false, verbose);
+
+				FindDupesFlags flags = FindDupesFlags::None;
+
+				SetFindDupesFlags(flags, FindDupesFlags::Verbose, verbose);
+				SetFindDupesFlags(flags, FindDupesFlags::SortOnSize, sortOnSize);
+				SetFindDupesFlags(flags, FindDupesFlags::SortInReverse, sortInReverse);
+				SetMaxNumThreads(flags, maxNumThreads);
+
+				allFiles.UpdateHashedFiles(flags);
 			}
+
+			if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 			{
 				TimeThis t("Apply hashes from uber set to individual sets.");
@@ -684,6 +669,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 				infiles.ApplyHashFrom(allFiles);
 			}
 
+			if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 			// we're done with all files
 			{
 				TimeThis t("Clean up uber set.");
@@ -692,6 +679,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 				allFiles.Strings.clear();
 			}
 		}
+
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 		// make a multimap of all files with a given size in the "files" list
 		std::unordered_map<long long, std::vector<size_t>> umap;
@@ -705,6 +694,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 			}
 		}
 
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		// sort the "infiles" on size
 		std::sort(infiles.Items.begin(), infiles.Items.end(), [&](FileOnDisk const &left, FileOnDisk const &right)
 		{
@@ -716,8 +707,12 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 			return left.Size > right.Size;
 		});
 
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		for (auto &infile : infiles.Items)
 		{
+			if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 			if (umap.find(infile.Size) != umap.end())
 			{
 				// there are files that match the infile's size. See if any of them have the same hash
@@ -739,7 +734,7 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 					if (includeDeleteScript)
 					{
 						Logger::Get().printf(Logger::Level::CmdScript, "del /F /A \"%s\"\n", infiles.GetFilePath(infile));
-						Logger::Get().printf(Logger::Level::Ps1Script, "\t\"%s\",\n", infiles.GetFilePath(infile));
+						Logger::Get().printf(Logger::Level::Ps1Script, "\t'%s'\n", EscapePowerShellString(infiles.GetFilePath(infile)).c_str());
 					}
 
 					Logger::Get().printf(Logger::Level::Dupes, "====================================================================================================\n");
@@ -761,6 +756,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 			}
 		}
 
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		if (includeDeleteScript)
 		{
 			DWORD dwLen = 0;
@@ -769,12 +766,23 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 	}
 	else
 	{
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 		// make sure all files that have the same size have updated hashes, and save the hash caches if necessary
 		{
 			TimeThis t("To update hashes");
 			verboseprintf("Updating hashes...\n");
-			files.UpdateHashedFiles(false, verbose);
+
+			FindDupesFlags flags = FindDupesFlags::None;
+
+			SetFindDupesFlags(flags, FindDupesFlags::Verbose, verbose);
+			SetFindDupesFlags(flags, FindDupesFlags::SortOnSize, sortOnSize);
+			SetFindDupesFlags(flags, FindDupesFlags::SortInReverse, sortInReverse);
+
+			files.UpdateHashedFiles(flags);
 		}
+
+		if (ControlCHandler::TestShouldTerminate()) { return false; }
 
 		// now, find the dupes
 		{
@@ -785,6 +793,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 			{
 				for (size_t i = 0; i<files.Items.size() - 1;)
 				{
+					if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 					FileOnDisk &file = files.Items[i];
 
 					// quit when we reach zero-byte sized files
@@ -825,6 +835,8 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 					// now, loop until the "diff" set is empty
 					do
 					{
+						if (ControlCHandler::TestShouldTerminate()) { return false; }
+
 						// get the hash of the first file in the set, which is the item we're going to compare with
 						auto &compareitem = *diff.begin();
 
@@ -916,19 +928,46 @@ bool FindDupes(const char *szRootFolder, const char *szInFolder, const wchar_t *
 //=====================================================================================================================================================================================================
 // main program
 //=====================================================================================================================================================================================================
-int _tmain(int argc, _TCHAR* argv[])
+int _main(int argc, wchar_t* argv[])
 {
+	ConsoleIcon icon(ID_ICON);
+	ControlCHandler ctrlc;
+
 #ifdef _DEBUG
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-	CommandLineOptions commandLineOptions;
+
+#ifdef _DEBUG
+	//while (!ControlCHandler::TestShouldTerminate())
+	//{
+	//	Sleep(50);
+	//}
+	//return 0;
+#endif
+
+	CommandLineOptions commandLineOptions={0};
 
 	if (!GetCommandLineOptions(argc, argv, commandLineOptions))
 	{
 		return -1;
 	}
 
+	//
+	// print some blank lines if needed
+	//
+	HANDLE	hFileO = console::GetCurrentConsoleOutputHandle();
+	CONSOLE_SCREEN_BUFFER_INFO	csbi;
+	GetConsoleScreenBufferInfo(hFileO, &csbi);
+
+	if ((csbi.dwCursorPosition.Y < 10) && (csbi.dwSize.Y > 50))
+	{
+		size_t blank_lines = 4 - csbi.dwCursorPosition.Y;
+		for (size_t i = 0; i < blank_lines; ++i)
+		{
+			printf("\n");
+		}
+	}
 
 	bool verbose = commandLineOptions.verbose;
 
@@ -936,7 +975,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	if (commandLineOptions.logo)
 	{
 		std::wstring version = GetLocalBinaryVersionString();
-		Logger::Get().printf(Logger::Level::Error, "SpongySoft FindDupes version %S (" __TIMESTAMP__ ") (" BUILD_DATE_STRING ") (Compiled for %d-bit)\nCopyright (c) 2000-2023 SpongySoft.\nFor more information, visit http://www.spongysoft.com\n", version.c_str(), sizeof(void *)* 8);
+		Logger::Get().printf(Logger::Level::Error, "SpongySoft FindDupes version %S (" __TIMESTAMP__ ") (" BUILD_DATE_STRING ") (Compiled for %d-bit)\nCopyright (c) 2000-2025 SpongySoft.\nFor more information, visit http://www.spongysoft.com\n", version.c_str(), sizeof(void *)* 8);
 	}
 
 	// show help
@@ -955,7 +994,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else if (commandLineOptions.generateHashForAllFiles)
 	{
 		verboseprintf("Generating hash for ALL files...\n");
-		GenerateHashForAllFiles(commandLineOptions.szRootFolder, verbose);
+		GenerateHashForAllFiles(commandLineOptions.szRootFolder, verbose, commandLineOptions.sortOnSize, commandLineOptions.sortInReverse);
 	}
 	else if (commandLineOptions.syncFolders)
 	{
@@ -964,7 +1003,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 	else
 	{
-		FindDupes(commandLineOptions.szRootFolder, commandLineOptions.szInFolder, commandLineOptions.szDupesPs1File, commandLineOptions.szDupesCmdFile, commandLineOptions.includeDeleteScript, commandLineOptions.infile, commandLineOptions.verbose);
+		FindDupes(commandLineOptions.szRootFolder, commandLineOptions.szInFolder, commandLineOptions.szDupesPs1File, commandLineOptions.szDupesCmdFile, commandLineOptions.includeDeleteScript, commandLineOptions.infile, commandLineOptions.verbose, commandLineOptions.sortOnSize, commandLineOptions.sortInReverse, commandLineOptions.maxNumThreads);
 	}
 
 	printf("Log file: \"%S\"\n", commandLineOptions.szDupesLogFile);
@@ -986,6 +1025,13 @@ int _tmain(int argc, _TCHAR* argv[])
 	return 0;
 }
 
+
+//=====================================================================================================================================================================================================
+//=====================================================================================================================================================================================================
+int wmain(int argc, wchar_t* argv[])
+{
+	return _main(argc, argv);
+}
 
 
 

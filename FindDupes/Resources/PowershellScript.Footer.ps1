@@ -1,5 +1,24 @@
 	"")
-$files = $files | ? { $_ -and (Test-Path -LiteralPath $_ ) }
+
+if (-not $DontCheckExistence)
+{
+	$numFiles = $files.Count - 1
+
+	Write-Host ("Checking {0:#,0} files for existence..." -f $numFiles)
+	$t0 = Get-Date
+	$files = $files | ? { $_ -and (Test-Path -LiteralPath $_ ) }
+	$t1 = Get-Date
+	Write-Host ("...it took {0:#,0.000} seconds." -f ($t1-$t0).TotalSeconds)
+
+	if ($files.Count -eq $numFiles)
+	{
+		Write-Host ("All {0:#,0} files exist." -f $numFiles)
+	}`
+	else
+	{
+		Write-Host ("Pared down file count from {0:#,0} to {1:#,0} (removed {2:#,0} files that don't exist)." -f $numFiles, $files.Count, ($numFiles-$files.Count))
+	}
+}
 
 function _Delete
 {
@@ -15,7 +34,7 @@ function _Delete
 		Write-Host -Fore Red $File
 	}
 
-	$folder = gi (Split-Path $File)
+	$folder = Get-Item -Force -Path (Split-Path -Parent -Path $File)
 
 	while ($folder)
 	{
@@ -50,6 +69,5 @@ if (-not $DoIt)
 {
 	Write-Host -Fore White "`nNot actually doing anything since the ""-DoIt"" option was not specified.`n"
 }
-
 
 

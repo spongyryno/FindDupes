@@ -11,16 +11,21 @@
 #include <Windows.h>
 #include <Shlobj.h>
 #include <intrin.h>
+#include <shellapi.h>
 
-#include <stdio.h>
-#include <vector>
 #include <algorithm>
-#include <unordered_map>
-#include <assert.h>
-#include <string>
-#include <functional>
-#include <set>
-#include <regex>
 #include <array>
-
+#include <assert.h>
+#include <chrono>
+#include <functional>
+#include <iomanip>
+#include <mutex>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <stdio.h>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
